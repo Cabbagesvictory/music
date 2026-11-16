@@ -1,0 +1,16 @@
+{
+  "_note": "songs 里每项声明 assets 下的一个 .mid，title / artist 用于页面「曲库」显示，可省略；default 指定默认曲目（留空则优先文件名含 luv letter 的，否则取第一首）。目录里多出来的 .mid 也会自动进曲库。",
+  "default": "Luv Letter(DJ Okawari).mid",
+  "songs": [
+    {
+      "file": "Luv Letter(DJ Okawari).mid",
+      "title": "Luv Letter",
+      "artist": "DJ OKAWARI"
+    },
+    {
+      "file": "Merry Christmas Mr Lawrence.mid",
+      "title": "Merry Christmas Mr. Lawrence",
+      "artist": "坂本龙一"
+    }
+  ]
+}
