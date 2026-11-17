@@ -63,7 +63,7 @@
     zoom: 1, viewLeft: 0, kw: 0, totalW: 0,
     whites: [], keyMap: new Map(),
     pps: 100, lookAhead: 4.2,
-    notes: [], bpm: 72, beatsPerBar: 4, barLines: [], songDuration: 0,
+    notes: [], bpm: 72, beatsPerBar: 4, barLines: [], barTimes: [], beatTimes: [], songDuration: 0,
     maxDur: 2,
     glow: new Map(),
     flash: new Map(),
@@ -184,18 +184,46 @@
     ctx.restore();
   }
 
+  /** 第一帧/切歌时把小节线与拍线算好；有 tempo map 时不再按单一 BPM 均匀铺 */
   function buildBarTimes() {
     var barDur = (60 / R.bpm) * R.beatsPerBar;
+    var beatsPerBar = Math.max(1, Math.round(R.beatsPerBar || 4));
+    R.barDur = barDur;
+
+    var bars = [];
+    var beats = [];
+    var i, k, t0, t1;
+
     if (R.barLines && R.barLines.length) {
-      R.barTimes = R.barLines.slice();
-      R.barDur = barDur;
+      bars = R.barLines.slice();
+      // 曲尾可能没有下一条小节线，按最后一段的长度补到可视范围
+      var total = R.songDuration + 8;
+      var n = bars.length;
+      var gap = n >= 2 ? Math.max(0.05, bars[n - 1] - bars[n - 2]) : barDur;
+      while (n && bars[n - 1] < total) {
+        bars.push(bars[n - 1] + gap);
+        n++;
+      }
+
+      // 拍线按相邻两小节之间的真实时长插值
+      for (i = 0; i < bars.length; i++) {
+        t0 = bars[i];
+        t1 = i + 1 < bars.length ? bars[i + 1] : t0 + barDur;
+        for (k = 0; k < beatsPerBar; k++) beats.push(t0 + (t1 - t0) * k / beatsPerBar);
+      }
+
+      R.barTimes = bars;
+      R.beatTimes = beats;
       return;
     }
-    // MIDI 导入等没有小节信息时，按拍号推算
-    var total = R.songDuration + 8;
-    R.barDur = barDur;
-    R.barTimes = [];
-    for (var t = 0; t <= total; t += barDur) R.barTimes.push(t);
+
+    // 内置示范曲等没有小节信息时，按拍号推算
+    var span = R.songDuration + 8;
+    var beatDur = 60 / R.bpm;
+    for (var t = 0; t <= span; t += barDur) bars.push(t);
+    for (var tb = 0; tb <= span; tb += beatDur) beats.push(tb);
+    R.barTimes = bars;
+    R.beatTimes = beats;
   }
 
   function layout() {
@@ -329,37 +357,47 @@
     ctx.fillRect(0, 0, R.W, R.H);
   }
 
+  /** 有序数字数组里第一个 >= t 的下标 */
+  function firstAtOrAfter(arr, t) {
+    var lo = 0, hi = arr.length;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (arr[mid] < t) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
   function drawGrid(time) {
     var ctx = R.ctx;
-    var beatDur = 60 / R.bpm;
     var bars = R.barTimes;
+    var beats = R.beatTimes;
     if (!bars || !bars.length) return;
 
     var endT = time + R.lookAhead;
+    var i, t, y;
     ctx.save();
     ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
 
-    // 拍线（淡）
+    // 拍线（淡）：在小节内部按真实时长插值，变速曲不会逐渐错位
     ctx.strokeStyle = 'rgba(' + COL.ink + ', 0.07)';
     ctx.lineWidth = 1;
-    var firstBeat = Math.floor(time / beatDur);
-    for (var bi = firstBeat; bi * beatDur <= endT; bi++) {
-      var tb = bi * beatDur;
-      if (tb < time - 0.01) continue;
-      var yb = R.hitY - (tb - time) * R.pps;
-      if (yb < -2 || yb > R.hitY) continue;
+    for (i = firstAtOrAfter(beats, time - 0.01); i < beats.length; i++) {
+      t = beats[i];
+      if (t > endT) break;
+      y = R.hitY - (t - time) * R.pps;
+      if (y < -2 || y > R.hitY) continue;
       ctx.beginPath();
-      ctx.moveTo(0, Math.round(yb) + 0.5);
-      ctx.lineTo(R.W, Math.round(yb) + 0.5);
+      ctx.moveTo(0, Math.round(y) + 0.5);
+      ctx.lineTo(R.W, Math.round(y) + 0.5);
       ctx.stroke();
     }
 
     // 小节线（亮） + 小节号
-    for (var i = 0; i < bars.length; i++) {
-      var tb2 = bars[i];
-      if (tb2 > endT) break;
-      if (tb2 < time - 0.4) continue;
-      var y = R.hitY - (tb2 - time) * R.pps;
+    for (i = firstAtOrAfter(bars, time - 0.4); i < bars.length; i++) {
+      t = bars[i];
+      if (t > endT) break;
+      y = R.hitY - (t - time) * R.pps;
       if (y < -2 || y > R.hitY) continue;
       var fade = clamp((R.hitY - y) / 60, 0, 1);
       ctx.strokeStyle = 'rgba(' + COL.ink + ',' + (0.17 * fade) + ')';

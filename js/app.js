@@ -14,6 +14,8 @@
     eyebrow: $('#eyebrow'),
     title: $('#songTitle'),
     meta: $('#songMeta'),
+    metaText: $('#songMetaText'),
+    tempoNow: $('#tempoNow'),
     stage: $('#stage'),
     hint: $('#hint'),
     play: $('#playBtn'),
@@ -44,7 +46,8 @@
     duration: 0,
     time: 0,
     glideSet: null,
-    panning: null
+    panning: null,
+    scrub: null
   };
 
   var transport = null;
@@ -66,6 +69,7 @@
     if (el.tip) el.tip.textContent = text;
   }
 
+  /** 顶部提示条；允许受控的 <b> 标签，外部数据必须先经 escapeHtml */
   function flashHint(text) {
     if (!el.hint) return;
     el.hint.classList.remove('fade');
@@ -74,6 +78,20 @@
     flashHint._t = setTimeout(function () {
       if (el.hint) el.hint.classList.add('fade');
     }, 4200);
+  }
+
+  /** 顶栏行尾实时显示当前片段 BPM（仅变速曲） */
+  function updateTempoBadge(t) {
+    if (!el.tempoNow) return;
+    var map = state.song && state.song.tempos;
+    if (!map || map.length < 2) return;
+    var bpm = map[0].bpm;
+    for (var i = map.length - 1; i >= 0; i--) {
+      if (t >= map[i].time) { bpm = map[i].bpm; break; }
+    }
+    if (bpm === el.tempoNow._bpm) return;
+    el.tempoNow._bpm = bpm;
+    el.tempoNow.textContent = + bpm + ' BPM';
   }
 
   /* ------------------------------------------------------------
@@ -91,11 +109,18 @@
     setPosition(0);
     vt = 0;
     state.time = 0;
+    state.scrub = null;
 
     el.title.textContent = song.title || 'Untitled';
     document.title = (song.title || '钢琴独奏') + ' · 钢琴独奏';
-    if (metaText) el.meta.textContent = metaText;
-    else el.meta.textContent = (song.bpm || 72) + ' BPM · ' + (song.beatsPerBar || 4) + '/4';
+    var metaEl = el.metaText || el.meta;
+    if (metaText) metaEl.textContent = metaText;
+    else metaEl.textContent = (song.tempoLabel || ((song.bpm || 72) + ' BPM')) + ' · ' +
+      (song.beatsPerBar || 4) + '/' + (song.beatUnit || 4);
+    if (el.tempoNow) {
+      el.tempoNow.textContent = '';
+      el.tempoNow._bpm = 0;
+    }
     if (eyebrowText) el.eyebrow.textContent = eyebrowText;
     el.timeTotal.textContent = fmt(state.duration);
     el.timeNow.textContent = '0:00';
@@ -134,23 +159,11 @@
     try { return transport.seconds || 0; } catch (e) { return 0; }
   }
 
-  function positionString(t) {
-    var bpm = (state.song && state.song.bpm) || 120;
-    var perBar = (60 / bpm) * ((state.song && state.song.beatsPerBar) || 4);
-    var bars = Math.floor(t / perBar);
-    var rem = t - bars * perBar;
-    var beats = Math.floor(rem / (60 / bpm));
-    var rem2 = rem - beats * (60 / bpm);
-    var six = rem2 / ((60 / bpm) / 4);
-    return bars + ':' + beats + ':' + six.toFixed(3);
-  }
-
   function setPosition(t) {
+    // Tone 15 对 seconds 赋值是可靠的，直接用秒定位。
+    // 不再用 bars:beats 兜底：Transport 的 BPM/拍号与曲目并不一致，
+    // 一旦触发兜底反而会把位置算错。
     transport.seconds = t;
-    if (Math.abs(getPos() - t) > 0.35) {
-      // 兜底：老版本 Tone 对 seconds 赋值支持不佳
-      transport.position = positionString(t);
-    }
   }
 
   function seek(t) {
@@ -169,6 +182,10 @@
 
   function beginPlay() {
     if (!state.ready || !state.taskReady) return;
+    // 采样曾加载失败时，借一次用户手势再试；成功后后续音符自动有声
+    if (!Audio.isSampleMode() && typeof Audio.retrySamples === 'function') {
+      Audio.retrySamples();
+    }
     if (state.duration > 0 && getPos() >= state.duration - 0.2) seek(0);
     else setPosition(getPos());
     transport.start('+0.05');
@@ -192,10 +209,16 @@
      UI 刷新
      ------------------------------------------------------------ */
 
+  var progressPct = -1;
+
   function setProgressUI(ratio) {
     var pct = clamp(ratio, 0, 1) * 100;
+    // 每帧都写 DOM 会无谓标脏，数值没变就跳过
+    if (Math.abs(pct - progressPct) < 0.01) return;
+    progressPct = pct;
     if (el.fill) el.fill.style.width = pct.toFixed(3) + '%';
     if (el.knob) el.knob.style.left = pct.toFixed(3) + '%';
+    if (el.progress) el.progress.setAttribute('aria-valuenow', String(Math.round(pct)));
   }
 
   var toastTimer = 0;
@@ -242,8 +265,10 @@
     }
 
     state.time = Math.max(0, vt);
+    // 拖动进度条时只预览：画面/进度跟手，音频等松手才真正 seek
+    var display = state.scrub === null ? state.time : state.scrub;
     try {
-      Renderer.render(state.time, dt, state.playing);
+      Renderer.render(display, dt, state.playing);
     } catch (err) {
       // 单帧绘制异常不能把整个循环带死
       if (!tick._warned) {
@@ -253,9 +278,18 @@
     }
 
     var dur = state.duration || 0;
-    setProgressUI(dur ? state.time / dur : 0);
-    el.timeNow.textContent = fmt(Math.min(state.time, dur));
-    el.timeTotal.textContent = fmt(dur);
+    updateTempoBadge(display);
+    setProgressUI(dur ? display / dur : 0);
+    var nowText = fmt(Math.min(display, dur));
+    if (nowText !== tick._now) {
+      tick._now = nowText;
+      el.timeNow.textContent = nowText;
+    }
+    var totalText = fmt(dur);
+    if (totalText !== tick._total) {
+      tick._total = totalText;
+      el.timeTotal.textContent = totalText;
+    }
 
     requestAnimationFrame(tick);
   }
@@ -398,25 +432,46 @@
       });
     }
 
-    // 进度条拖动
+    // 进度条拖动：拖动期间只更新预览时间，松手才重建 Transport 事件。
+    // 每次 pointermove 都 seek 会把上千个音符重新排一遍，必掉帧且会爆音
     var scrubbing = false;
+    var resumeAfterScrub = false;
 
-    function scrubTo(clientX) {
+    function previewAt(clientX) {
       var r = el.progress.getBoundingClientRect();
       var ratio = clamp((clientX - r.left) / Math.max(1, r.width), 0, 1);
-      seek(ratio * state.duration);
+      state.scrub = ratio * state.duration;
+      setProgressUI(ratio);
+      el.timeNow.textContent = fmt(state.scrub);
     }
 
-    el.progress.addEventListener('pointerdown', function (e) {
+    function beginScrub(e) {
+      if (!state.taskReady) return;
       scrubbing = true;
+      resumeAfterScrub = state.playing;
+      if (state.playing) pause();
       el.progress.setPointerCapture && el.progress.setPointerCapture(e.pointerId);
-      scrubTo(e.clientX);
-    });
+      previewAt(e.clientX);
+    }
+
+    function endScrub(cancelled) {
+      if (!scrubbing) return;
+      scrubbing = false;
+      var target = cancelled || state.scrub === null ? getPos() : state.scrub;
+      state.scrub = null;
+      if (!cancelled) seek(target);
+      if (resumeAfterScrub) {
+        resumeAfterScrub = false;
+        beginPlay();
+      }
+    }
+
+    el.progress.addEventListener('pointerdown', beginScrub);
     el.progress.addEventListener('pointermove', function (e) {
-      if (scrubbing) scrubTo(e.clientX);
+      if (scrubbing) previewAt(e.clientX);
     });
-    el.progress.addEventListener('pointerup', function () { scrubbing = false; });
-    el.progress.addEventListener('pointercancel', function () { scrubbing = false; });
+    el.progress.addEventListener('pointerup', function () { endScrub(false); });
+    el.progress.addEventListener('pointercancel', function () { endScrub(true); });
 
     global.addEventListener('keydown', function (e) {
       if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
@@ -443,8 +498,20 @@
      MIDI 导入
      ------------------------------------------------------------ */
 
+  /** 读 SMF 头里的 format 字段（-1 表示不是标准 MIDI） */
+  function midiFormatOf(buf) {
+    if (!buf || buf.byteLength < 10) return -1;
+    var b = new Uint8Array(buf, 0, 10);
+    if (String.fromCharCode(b[0], b[1], b[2], b[3]) !== 'MThd') return -1;
+    return (b[8] << 8) | b[9];
+  }
+
   function parseMidi(buf) {
-    return import('https://cdn.jsdelivr.net/npm/@tonejs/midi@2/+esm').then(function (mod) {
+    // format 2 是多段互不相关的序列，叠到同一条时间线上会完全乱掉，直接拒绝
+    if (midiFormatOf(buf) === 2) {
+      return Promise.reject(new Error('暂不支持 format 2（多序列）MIDI'));
+    }
+    return import('https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/+esm').then(function (mod) {
       var Midi = mod.Midi || (mod.default && mod.default.Midi);
       if (!Midi) throw new Error('MIDI 解析器不可用');
       return new Midi(buf);
@@ -489,7 +556,9 @@
       track.notes.forEach(function (n) {
         if (!isFinite(n.time) || !isFinite(n.duration)) return;
         notes.push({
-          midi: n.midi,
+          // 渲染器只覆盖 A0–C8：超出范围的音会被播放但画不出来，
+          // 也点不亮琴键，这里统一夹到 88 键范围内
+          midi: Math.max(21, Math.min(108, n.midi)),
           start: Math.max(0, n.time),
           dur: Math.max(0.06, n.duration),
           vel: clamp(0.22 + n.velocity * 0.9, 0.05, 1),
@@ -506,42 +575,115 @@
       end = Math.max(end, notes[i].start + notes[i].dur);
     }
 
-    var tempo = midi.header.tempos && midi.header.tempos.length ? midi.header.tempos[0].bpm : 120;
-    tempo = clamp(Math.round(tempo || 120), 20, 300);
+    // 速度标记可能多次变化：bpm 取首值作默认，顶栏显示区间
+    var tempos = (midi.header && midi.header.tempos) ? midi.header.tempos : [];
+    var firstBpm = tempos.length ? Math.round(tempos[0].bpm || 0) : 0;
+    var tempo = clamp(firstBpm || 120, 20, 300);
+    var minBpm = 0;
+    var maxBpm = 0;
+    for (var ti = 0; ti < tempos.length; ti++) {
+      var bpmAt = Math.round(tempos[ti].bpm || 0);
+      if (bpmAt < 20 || bpmAt > 300) continue;
+      if (!minBpm || bpmAt < minBpm) minBpm = bpmAt;
+      if (bpmAt > maxBpm) maxBpm = bpmAt;
+    }
+    if (!minBpm) { minBpm = tempo; maxBpm = tempo; }
+    var tempoLabel = maxBpm - minBpm >= 1 ? (minBpm + '–' + maxBpm + ' BPM') : (tempo + ' BPM');
+
+    // 实时 BPM 用：记录每个速度事件的时间点（秒），并去掉相邻重复值
+    var tempoMap = null;
+    try {
+      if (tempos.length > 1 && midi.header && typeof midi.header.ticksToSeconds === 'function') {
+        var points = [];
+        for (var tj = 0; tj < tempos.length; tj++) {
+          var ev = tempos[tj];
+          var evBpm = Math.round(ev.bpm || 0);
+          if (evBpm < 20 || evBpm > 300) continue;
+          var evTime = (typeof ev.time === 'number' && isFinite(ev.time))
+            ? ev.time
+            : midi.header.ticksToSeconds(ev.ticks || 0);
+          if (!isFinite(evTime)) continue;
+          points.push({ time: Math.max(0, evTime), bpm: evBpm });
+        }
+        points.sort(function (a, b) { return a.time - b.time; });
+        var compact = [];
+        for (var pk = 0; pk < points.length; pk++) {
+          if (!compact.length || compact[compact.length - 1].bpm !== points[pk].bpm) {
+            compact.push(points[pk]);
+          }
+        }
+        if (compact.length > 1) tempoMap = compact;
+      }
+    } catch (e) {
+      tempoMap = null;
+    }
+
     var ts = 4;
+    var beatUnit = 4;
     if (midi.header.timeSignatures && midi.header.timeSignatures.length) {
       var sig = midi.header.timeSignatures[0].timeSignature;
       if (sig && sig[0]) ts = sig[0];
+      if (sig && sig[1]) beatUnit = sig[1];
+    }
+
+    // 小节线要按真实 tempo map 换算；只拿首个 BPM 均匀铺会在变速曲里
+    // 越走越偏（本仓库两首曲子都是变速的）
+    var barLines = null;
+    try {
+      var head = midi.header;
+      if (head && typeof head.ticksToSeconds === 'function') {
+        var lastTick = 0;
+        midi.tracks.forEach(function (track) {
+          track.notes.forEach(function (n) {
+            var noteEnd = (n.ticks || 0) + (n.durationTicks || 0);
+            if (noteEnd > lastTick) lastTick = noteEnd;
+          });
+        });
+        if (!lastTick && typeof head.secondsToTicks === 'function') {
+          lastTick = head.secondsToTicks(end);
+        }
+        var stepTicks = (head.ppq || 480) * ts * 4 / beatUnit;
+        if (lastTick > 0 && stepTicks > 0) {
+          barLines = [];
+          for (var tk = 0; tk <= lastTick; tk += stepTicks) {
+            var sec = head.ticksToSeconds(tk);
+            if (!isFinite(sec)) break;
+            barLines.push(sec);
+          }
+          if (!barLines.length) barLines = null;
+        }
+      }
+    } catch (e) {
+      barLines = null;
     }
 
     return {
       title: (midi.name || '').trim() || (fallbackName || 'MIDI 曲谱').replace(/\.midi?$/i, ''),
       bpm: tempo,
+      tempoLabel: tempoLabel,
+      tempos: tempoMap,
       beatsPerBar: ts,
+      beatUnit: beatUnit,
       notes: notes,
-      barLines: null,
+      barLines: barLines,
       duration: end + 1.5
     };
   }
 
-  function applyMidiSong(song, label, artist, eyebrow) {
+  function applyMidiSong(song, label, artist, eyebrow, autoPlay, quiet) {
     if (state.playing) pause();
 
-    var meta = (artist ? artist + ' · ' : '') + song.bpm + ' BPM · ' + song.beatsPerBar + '/4';
+    var meta = (artist ? artist + ' · ' : '') +
+      (song.tempoLabel || (song.bpm + ' BPM')) + ' · ' +
+      song.beatsPerBar + '/' + (song.beatUnit || 4);
     bindSong(song, meta, eyebrow || 'Imported Score · 导入谱面');
 
-    // 入场遮罩如果还在，同步换个名字
-    if (el.splash) {
-      var h1 = el.splash.querySelector('h1');
-      var sub = el.splash.querySelector('.sub');
-      if (h1) h1.textContent = song.title;
-      if (sub) sub.textContent = artist || '钢琴独奏';
-    }
-
-    flashHint('已载入 <b>' + (label || song.title) + '</b> · 共 ' + song.notes.length + ' 个音');
-    if (state.ready) beginPlay();
+    if (!quiet) flashHint('已载入 <b>' + escapeHtml(label || song.title) + '</b> · 共 ' + song.notes.length + ' 个音');
+    if (autoPlay !== false && state.ready) beginPlay();
     return song;
   }
+
+  var importSeq = 0;
 
   function loadMidiFile(file) {
     if (!file) return;
@@ -549,13 +691,28 @@
       flashHint('只支持 <b>.mid</b> / <b>.midi</b> 文件');
       return;
     }
-    flashHint('正在解析 <b>' + file.name + '</b> …');
+    if (file.size > 8 * 1024 * 1024) {
+      flashHint('文件过大：上限 8 MB');
+      return;
+    }
+    var token = ++importSeq;
+    flashHint('正在解析 <b>' + escapeHtml(file.name) + '</b> …');
 
     file.arrayBuffer()
       .then(parseMidi)
-      .then(function (midi) { return applyMidiSong(midiToSong(midi, file.name), file.name); })
+      .then(function (midi) {
+        if (token !== importSeq) return null;   // 已被后一次拖入取代
+        var song = midiToSong(midi, file.name);
+        // 导入的谱面不再属于 assets 曲库，同时取消还在飞的曲库载入
+        library.reqSeq++;
+        library.current = -1;
+        library.currentPath = '';
+        renderLibrary();
+        return applyMidiSong(song, file.name);
+      })
       .catch(function (err) {
-        flashHint('载入失败：' + (err && err.message ? err.message : err));
+        if (token !== importSeq) return;
+        flashHint('载入失败：' + escapeHtml(err && err.message ? err.message : err));
       });
   }
 
@@ -567,7 +724,8 @@
     items: [],
     manifest: {},
     current: -1,           // -1 = 内置示范曲
-    currentPath: ''        // 当前选中的 assets 文件，重扫时用它恢复选中
+    currentPath: '',       // 当前选中的 assets 文件，重扫时用它恢复选中
+    reqSeq: 0              // 选择序号：丢弃过期的异步载入结果
   };
 
   function escapeHtml(s) {
@@ -642,7 +800,10 @@
         var path = /^(https?:|\/|assets\/)/i.test(file) ? file : 'assets/' + file;
         var name = assetBaseName(path);
         // 目录列表可用时，清单里写了但实际不存在的文件不进列表
-        if (names.length && names.indexOf(name) < 0) return;
+        if (names.length && names.indexOf(name) < 0) {
+          if (global.console) console.warn('[library] manifest 声明的文件不在 assets 目录：' + name);
+          return;
+        }
         push({
           path: path,
           file: name,
@@ -745,10 +906,10 @@
     selectLibraryIndex(isNaN(idx) ? -1 : idx);
   }
 
-  /** 载入 assets 里的单个曲目 */
-  function loadAssetItem(item) {
+  /** 载入 assets 里的单个曲目：只解析，不负责应用与播放 */
+  function loadAssetItem(item, quiet) {
     if (!item) return Promise.resolve(null);
-    flashHint('正在载入 <b>' + escapeHtml(item.title) + '</b> …');
+    if (!quiet) flashHint('正在载入 <b>' + escapeHtml(item.title) + '</b> …');
 
     return fetch(item.path, { cache: 'no-store' })
       .then(function (r) {
@@ -771,7 +932,7 @@
         if (global.console) {
           console.info('[library] 已载入 ' + item.path + '（' + song.notes.length + ' 个音，' + song.duration.toFixed(1) + ' 秒）');
         }
-        return applyMidiSong(song, song.title, item.artist, 'Asset Library · 曲库');
+        return song;
       });
   }
 
@@ -779,14 +940,21 @@
   function selectLibraryIndex(index, silent) {
     var item = index >= 0 ? library.items[index] : null;
     if (index >= 0 && !item) return;
+    // 用户已经进入页面后，默认曲不再异步顶掉当前内容，避免标题/时长跳变
+    if (silent && state.entered) return;
+    // 用户主动选曲库时，取消还在解析的拖入 MIDI
+    if (!silent) importSeq++;
 
+    // 每次选择递增序号：异步载入回来时若已不是最新选择就直接丢弃，
+    // 避免快速切换时“后点的先到、先点的后覆盖”
+    var token = ++library.reqSeq;
     var prev = library.current;
     var prevPath = library.currentPath;
     library.current = item ? index : -1;
     library.currentPath = item ? item.path : '';
-    renderLibrary();
 
     if (!item) {
+      renderLibrary();
       if (state.playing) pause();
       bindSong(global.Piece.buildSong(), null, 'Piano Solo · 内置示范曲');
       if (silent) return;
@@ -795,13 +963,27 @@
       return;
     }
 
-    loadAssetItem(item).catch(function (err) {
+    // 静默载入不提前改菜单文字，真正应用时再一次性更新
+    if (!silent) renderLibrary();
+
+    loadAssetItem(item, silent).then(function (song) {
+      if (token !== library.reqSeq) return;
+      // 载入期间用户已进入页面：保留当前曲目，文字不做任何变动
+      if (silent && state.entered) {
+        library.current = prev;
+        library.currentPath = prevPath;
+        return;
+      }
+      renderLibrary();
+      applyMidiSong(song, song.title, item.artist, 'Asset Library · 曲库', !silent, silent);
+    }).catch(function (err) {
+      if (token !== library.reqSeq) return;
       var msg = err && err.message ? err.message : String(err);
       if (global.console) console.warn('[library] 曲目未载入：', msg);
-      // 载入失败就退回上一首，并把原因写在提示里
       library.current = prev;
       library.currentPath = prevPath;
       renderLibrary();
+      if (silent && state.entered) return;
       flashHint('载入 <b>' + escapeHtml(item.title) + '</b> 失败：' + escapeHtml(msg));
       // 入场页还在时，失败原因也能直接看到
       if (el.tip && !state.entered) {
@@ -850,10 +1032,11 @@
 
     collectLibrary().then(function (items) {
       library.items = items;
-      library.current = defaultLibraryIndex(items);
+      var defIdx = defaultLibraryIndex(items);
+      // 不预先改 current：载入失败时才能正确回滚到内置曲目
       renderLibrary();
-      if (library.current >= 0) {
-        selectLibraryIndex(library.current, true);
+      if (defIdx >= 0) {
+        selectLibraryIndex(defIdx, true);
       } else {
         if (global.console) console.info('[library] assets 里暂无可选 MIDI');
         // 空曲库时把原因和做法写在入场页上
@@ -922,9 +1105,17 @@
         state.ready = true;
         el.play.disabled = false;
         hideSplash();
-        beginPlay();
-        if (!Audio.isSampleMode()) {
-          flashHint('采样音色未能加载，已切换为合成钢琴 · 拖入 <b>.mid</b> 可载入任意曲谱');
+        if (Audio.isSampleMode()) {
+          beginPlay();
+        } else {
+          // 没有采样就保持静音，不自动播放一首无声的曲子
+          flashHint('钢琴采样加载失败（CDN 与本地均不可用），请检查网络或 assets/piano 后刷新 · 拖入 <b>.mid</b> 可载入任意曲谱');
+          // 网络恢复时自动再试一次，不必刷新页面
+          setTimeout(function () {
+            Audio.retrySamples().then(function (ok) {
+              if (ok) flashHint('钢琴采样已恢复，可以开始播放');
+            });
+          }, 2500);
         }
       }).catch(function (err) {
         state.entered = false;

@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#f5e8d6">
 <title>Letters in Aether · 钢琴独奏</title>
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-<link rel="stylesheet" href="css/style.css?v=25">
+<link rel="stylesheet" href="css/style.css?v=32">
 </head>
 <body>
 
@@ -15,8 +15,9 @@
     <div class="brand">
       <p class="eyebrow" id="eyebrow">Piano Solo · 内置示范曲</p>
       <h1 id="songTitle">Letters in Aether</h1>
-      <p class="meta" id="songMeta">原创 · 72 BPM · 4/4</p>
     </div>
+
+    <p class="meta" id="songMeta"><span id="songMetaText">原创 · 72 BPM · 4/4</span><span class="tempo-now" id="tempoNow"></span></p>
 
     <div class="tools">
       <div class="library-group">
@@ -46,8 +47,8 @@
   </header>
 
   <main class="stage" id="stageBox">
-    <canvas id="stage"></canvas>
-    <p class="hint" id="hint">拖入 <b>.mid</b> 文件可载入任意曲谱 · 曲库 可切换内置曲目 · 空格 播放/暂停 · ← → 快进快退 · 滚轮 缩放 · 拖动画面 平移 · 点击琴键 试弹</p>
+    <canvas id="stage" role="img" aria-label="钢琴瀑布流谱面与 88 键键盘，点击琴键可试弹"></canvas>
+    <p class="hint" id="hint" role="status" aria-live="polite">拖入 <b>.mid</b> 文件可载入任意曲谱 · 曲库 可切换内置曲目 · 空格 播放/暂停 · ← → 快进快退 · 滚轮 缩放 · 拖动画面 平移 · 点击琴键 试弹</p>
   </main>
 
   <footer class="transport">
@@ -56,7 +57,7 @@
       <svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="5" width="3.4" height="14" rx="1.2"/><rect x="13.6" y="5" width="3.4" height="14" rx="1.2"/></svg>
     </button>
 
-    <div class="progress" id="progress">
+    <div class="progress" id="progress" role="slider" tabindex="0" aria-label="播放进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
       <div class="track"><div class="fill" id="progressFill"></div></div>
       <div class="knob" id="progressKnob"></div>
     </div>
@@ -70,17 +71,17 @@
 <div class="splash" id="splash">
   <div class="splash-inner">
     <p class="eyebrow">A Piano Story</p>
-    <h1>Letters in Aether</h1>
-    <p class="sub">写给光的信 · 原创钢琴小品</p>
+    <h1>Luv Letter</h1>
+    <p class="sub">DJ OKAWARI · 钢琴独奏</p>
     <button id="enterBtn" class="enter">开 始 聆 听</button>
     <p class="tip" id="splashTip">首次进入需加载钢琴采样音色</p>
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/tone@15/build/Tone.js"></script>
-<script src="js/piece.js?v=25"></script>
-<script src="js/audio.js?v=25"></script>
-<script src="js/renderer.js?v=25"></script>
-<script src="js/app.js?v=25"></script>
+<script src="https://cdn.jsdelivr.net/npm/tone@15.1.22/build/Tone.js"></script>
+<script src="js/piece.js?v=32"></script>
+<script src="js/audio.js?v=32"></script>
+<script src="js/renderer.js?v=32"></script>
+<script src="js/app.js?v=32"></script>
 </body>
 </html>

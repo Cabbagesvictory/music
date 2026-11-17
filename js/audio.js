@@ -1,7 +1,7 @@
 /* ===========================================================
    audio.js — 钢琴音频引擎
-   采样优先走 CDN（jsDelivr → 官方源），两者都不可用时改用
-   assets/piano/ 下的本地采样，全部失败才降级为加法合成钢琴。
+   采样默认走 jsDelivr CDN，失败或超时后回落到 assets/piano/
+   下的本地采样；所有采样源都不可用时保持静音，不使用合成音色。
    =========================================================== */
 (function (global) {
   'use strict';
@@ -24,31 +24,77 @@
     }
   })();
 
-  // 优先走 CDN；jsDelivr 不通时直接回落到本地文件（比再等一个远程源快），
-  // 官方 GitHub Pages 源作为最后的远程备份
+  // 默认走 CDN；jsDelivr 不通或超时后回落到本地文件，本地是最终兜底
   var SAMPLER_SOURCES = [
     'https://cdn.jsdelivr.net/gh/nbrosowsky/tonejs-instruments@master/samples/piano/',
-    LOCAL_SAMPLES,
-    'https://tonejs.github.io/audio/salamander/'
+    LOCAL_SAMPLES
   ];
-  var LOAD_TIMEOUT = 6500;   // 超过这个时间先用合成音色顶上
   var SOURCE_TIMEOUT = 4000; // 单个采样源的最长等待，超时就换下一个源
 
   var A = {
     ready: false,
-    mode: 'none',            // 'samples' | 'synth'
+    mode: 'none',            // 'samples' | 'none'
     started: false,
     sampler: null,
-    synth: null,
     masterVol: 1
   };
 
-  function delay(ms) {
-    return new Promise(function (resolve) { setTimeout(resolve, ms); });
-  }
-
   function midiToFreq(midi) {
     return 440 * Math.pow(2, (midi - 69) / 12);
+  }
+
+  /** 从单个源加载完整采样，带超时与统一 settle */
+  function loadSource(baseUrl, bus) {
+    return new Promise(function (resolve, reject) {
+      var Tone = global.Tone;
+      var timer = 0;
+      var settled = false;
+      var sampler = null;
+
+      function ok() {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(sampler);
+      }
+
+      function fail(message) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { sampler.dispose(); } catch (e) { /* noop */ }
+        reject(new Error(message));
+      }
+
+      sampler = new Tone.Sampler({
+        urls: SAMPLER_URLS,
+        baseUrl: baseUrl,
+        attack: 0.001,
+        release: 1.15,
+        curve: 'exponential',
+        onload: ok,
+        onerror: function () { fail('取样失败'); }
+      });
+      sampler.volume.value = -2;
+      sampler.connect(bus);
+      // 源半通不通时会一直挂着，超时后丢弃它换下一个
+      timer = setTimeout(function () { fail('取样超时'); }, SOURCE_TIMEOUT);
+    });
+  }
+
+  /** 按 CDN → 本地的顺序加载；全部失败返回 null */
+  function loadSampler(bus) {
+    function attempt(i) {
+      if (i >= SAMPLER_SOURCES.length) return Promise.resolve(null);
+      return loadSource(SAMPLER_SOURCES[i], bus).catch(function (err) {
+        if (global.console) {
+          console.warn('[audio] 采样源不可用：' + SAMPLER_SOURCES[i] +
+            '（' + (err && err.message ? err.message : err) + '）');
+        }
+        return attempt(i + 1);
+      });
+    }
+    return attempt(0);
   }
 
   /** 初始化音频图。必须在用户手势中调用（内部会 resume AudioContext）。 */
@@ -73,87 +119,52 @@
         A.bus = bus;
         A.volume = volume;
 
-        // ---- 降级用合成钢琴 ----
-        A.synth = new Tone.PolySynth(Tone.Synth, {
-          oscillator: {
-            type: 'custom',
-            partials: [1, 0.44, 0.19, 0.09, 0.045, 0.022, 0.01]
-          },
-          envelope: {
-            attack: 0.004,
-            decay: 1.7,
-            sustain: 0.035,
-            release: 1.6,
-            decayCurve: 'exponential',
-            releaseCurve: 'exponential'
-          }
-        });
-        A.synth.maxPolyphony = 64;
-        A.synth.volume.value = -8;
-        A.synth.connect(bus);
-
-        // ---- 真实采样：按镜像顺序尝试，任一源成功即用 ----
-        function loadSampler(i) {
-          if (i >= SAMPLER_SOURCES.length) return Promise.resolve(false);
-          var timer = 0;
-          return new Promise(function (resolve, reject) {
-            var sampler = new Tone.Sampler({
-              urls: SAMPLER_URLS,
-              baseUrl: SAMPLER_SOURCES[i],
-              attack: 0.001,
-              release: 1.15,
-              curve: 'exponential',
-              onload: function () {
-                clearTimeout(timer);
-                resolve(sampler);
-              },
-              onerror: function () {
-                clearTimeout(timer);
-                try { sampler.dispose(); } catch (e) { /* noop */ }
-                reject(new Error('取样失败'));
-              }
-            });
-            sampler.volume.value = -2;
-            sampler.connect(bus);
-            // 源半通不通时会一直挂着，超时后丢弃它换下一个
-            timer = setTimeout(function () {
-              try { sampler.dispose(); } catch (e) { /* noop */ }
-              reject(new Error('取样超时'));
-            }, SOURCE_TIMEOUT);
-          }).then(function (sampler) {
+        // 等采样加载出结果（成功或所有源都失败）再就绪，
+        // 保证第一枚音符就是真实钢琴采样（或彻底静音）
+        return loadSampler(bus).then(function (sampler) {
+          if (sampler) {
             A.sampler = sampler;
-            return true;
-          }).catch(function () {
-            return loadSampler(i + 1);
-          });
-        }
-
-        var loaded = loadSampler(0);
-
-        var settle = Promise.race([
-          loaded,
-          delay(LOAD_TIMEOUT).then(function () { return 'timeout'; })
-        ]);
-
-        return settle.then(function (result) {
-          A.mode = result === true ? 'samples' : 'synth';
-          A.ready = true;
-          // 采样如果晚到，静默升级
-          if (result !== true) {
-            loaded.then(function (ok) { if (ok) A.mode = 'samples'; });
+            A.mode = 'samples';
+          } else {
+            A.mode = 'none';
           }
+          A.ready = true;
           return A;
         });
       });
     })();
+
+    // 初始化失败（如音频上下文被拒）时清掉缓存，允许用户再点一次重试
+    A._promise = A._promise.catch(function (err) {
+      A._promise = null;
+      throw err;
+    });
     return A._promise;
   };
 
-  /** 触发一个音 */
+  /** 采样全部失败后重新加载（不重建音频图），返回是否成功 */
+  A.retrySamples = function () {
+    if (A.sampler) return Promise.resolve(true);
+    if (!A.ready || !A.bus) return Promise.resolve(false);
+    if (A._retry) return A._retry;
+    A._retry = loadSampler(A.bus).then(function (sampler) {
+      A._retry = null;
+      if (sampler) {
+        A.sampler = sampler;
+        A.mode = 'samples';
+      }
+      return !!sampler;
+    }, function () {
+      A._retry = null;
+      return false;
+    });
+    return A._retry;
+  };
+
+  /** 触发一个音；采样未就绪时静默跳过，不发声也不合成 */
   A.noteOn = function (midi, dur, time, velocity) {
-    if (!A.ready) return;
-    var tone = (A.mode === 'samples' && A.sampler) ? A.sampler : A.synth;
-    if (!tone) return;
+    if (!A.ready || A.mode !== 'samples' || !A.sampler) return;
+    var tone = A.sampler;
     var freq = midiToFreq(midi);
     var v = Math.max(0.03, Math.min(1, velocity === undefined ? 0.7 : velocity));
     var d = Math.max(0.05, dur || 0.8);
@@ -169,7 +180,6 @@
   A.stopAll = function () {
     try {
       if (A.sampler) A.sampler.releaseAll();
-      if (A.synth) A.synth.releaseAll();
     } catch (e) { /* noop */ }
   };
 
