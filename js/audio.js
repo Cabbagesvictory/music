@@ -1,7 +1,9 @@
 /* ===========================================================
    audio.js — 钢琴音频引擎
-   采样默认走 jsDelivr CDN，失败或超时后回落到 assets/piano/
-   下的本地采样；所有采样源都不可用时保持静音，不使用合成音色。
+   采样优先整包加载：assets/piano.zip 一次请求（内部 6 路 Range 分块并行），
+   解包后以 blob URL 直接喂给 Tone.Sampler，并写入 Cache Storage 供二次访问复用；
+   整包不可用时回落到 assets/piano/ 下的分散采样。
+   所有采样源都不可用时保持静音，不使用合成音色。
    =========================================================== */
 (function (global) {
   'use strict';
@@ -15,41 +17,314 @@
     C7: 'C7.mp3', 'F#7': 'Fs7.mp3', C8: 'C8.mp3'
   };
 
-  // 本地采样目录（转成绝对 URL，避免不同环境下相对路径解析差异）
-  var LOCAL_SAMPLES = (function () {
+  function absolutize(path) {
     try {
-      return new URL('assets/piano/', document.baseURI).href;
+      return new URL(path, document.baseURI).href;
     } catch (e) {
-      return 'assets/piano/';
+      return path;
     }
-  })();
+  }
 
-  // 默认走 CDN；jsDelivr 不通或超时后回落到本地文件，本地是最终兜底
-  var SAMPLER_SOURCES = [
-    'https://cdn.jsdelivr.net/gh/nbrosowsky/tonejs-instruments@master/samples/piano/',
-    LOCAL_SAMPLES
-  ];
-  var SOURCE_TIMEOUT = 12000; // 单个采样源的最长等待：CDN 慢网络给足时间，超时才换下一个源
+  // 本地采样目录（绝对 URL，避免不同环境下相对路径解析差异）
+  var LOCAL_SAMPLES = absolutize('assets/piano/');
+
+  // 采样整包：采样有增删改后跑一次 tools/build_samples_zip.py，再把版本号加 1，
+  // 一并刷新浏览器 HTTP 缓存和 Cache Storage 里的旧包
+  var BUNDLE_VERSION = '1';
+  var BUNDLE_URL = absolutize('assets/piano.zip?v=' + BUNDLE_VERSION);
+  var BUNDLE_CACHE = 'piano-bundle';
+  var BUNDLE_CHUNKS = 6;      // GitHub Pages 走 HTTP/1.1，6 路分块正好吃满浏览器并发
+  var BUNDLE_STALL = 25000;   // 下载停滞超过 25s 判定失败，交给下一个源
+  var DECODE_TIMEOUT = 30000; // 整包到手后浏览器解码的最长等待
+  var SOURCE_TIMEOUT = 45000; // 兜底的分散采样：弱网也给足时间，不抢先超时
 
   var A = {
     ready: false,
     mode: 'none',            // 'samples' | 'none'
     started: false,
     sampler: null,
-    masterVol: 1
+    masterVol: 1,
+    onProgress: null         // 入场页注册：function (stage, loaded, total)
   };
+
+  /** 加载进度：stage = 'download' | 'unzip' | 'decode' */
+  function report(stage, loaded, total) {
+    if (typeof A.onProgress !== 'function') return;
+    try { A.onProgress(stage, loaded, total); } catch (e) { /* noop */ }
+  }
 
   function midiToFreq(midi) {
     return 440 * Math.pow(2, (midi - 69) / 12);
   }
 
-  /** 从单个源加载完整采样，带超时与统一 settle */
-  function loadSource(baseUrl, bus) {
+  /** 从 Cache Storage 取整包；没有或不可用返回 null */
+  function readCachedBundle() {
+    if (!global.caches) return Promise.resolve(null);
+    return global.caches.open(BUNDLE_CACHE)
+      .then(function (cache) { return cache.match(BUNDLE_URL); })
+      .then(function (res) { return res ? res.arrayBuffer() : null; })
+      .catch(function () { return null; });
+  }
+
+  /** 整包写入 Cache Storage；无痕模式或配额满时失败也不影响播放 */
+  function writeCachedBundle(buffer) {
+    if (!global.caches) return Promise.resolve();
+    return global.caches.open(BUNDLE_CACHE).then(function (cache) {
+      // 版本号加 1 后旧包换个 URL，顺手清掉，不让它在 Cache Storage 里堆积
+      return cache.keys().then(function (requests) {
+        return Promise.all(requests.map(function (req) {
+          return req.url === BUNDLE_URL ? null : cache.delete(req);
+        }));
+      }).catch(function () { /* noop */ }).then(function () {
+        return cache.put(BUNDLE_URL, new Response(buffer, {
+          headers: { 'Content-Type': 'application/zip' }
+        }));
+      });
+    }).catch(function () { /* noop */ });
+  }
+
+  /** 流式读取响应体，边读边回报累计字节；不支持流时退回 arrayBuffer */
+  function readStream(res, onChunk) {
+    if (!res.body || !res.body.getReader) {
+      return res.arrayBuffer().then(function (buf) {
+        if (onChunk) onChunk(buf.byteLength);
+        return buf;
+      });
+    }
+    var reader = res.body.getReader();
+    var chunks = [];
+    var loaded = 0;
+
+    function pump() {
+      return reader.read().then(function (step) {
+        if (step.done) {
+          var out = new Uint8Array(loaded);
+          var pos = 0;
+          for (var i = 0; i < chunks.length; i++) {
+            out.set(chunks[i], pos);
+            pos += chunks[i].length;
+          }
+          return out.buffer;
+        }
+        chunks.push(step.value);
+        loaded += step.value.length;
+        if (onChunk) onChunk(loaded);
+        return pump();
+      });
+    }
+    return pump();
+  }
+
+  /** “无新字节即中止”的下载守卫：网络半通时不让入场页无限干等 */
+  function stallGuard() {
+    var ac = global.AbortController ? new AbortController() : null;
+    var lastTick = Date.now();
+    var timer = ac ? setInterval(function () {
+      if (Date.now() - lastTick <= BUNDLE_STALL) return;
+      ac.stalled = true;
+      try { ac.abort(); } catch (e) { /* noop */ }
+    }, 2000) : 0;
+
+    return {
+      signal: ac ? ac.signal : undefined,
+      tick: function () { lastTick = Date.now(); },
+      stop: function () { if (timer) clearInterval(timer); },
+      stalled: function () { return !!(ac && ac.stalled); }
+    };
+  }
+
+  /** 按总长度切 6 段并发 Range 下载；任意一段失败即整体失败 */
+  function downloadChunked(total) {
+    // 没有 AbortController 就无法在停滞时中断分块，直接交给整体下载
+    if (!global.AbortController) return Promise.reject(new Error('环境不支持分块取消'));
+
+    var size = Math.ceil(total / BUNDLE_CHUNKS);
+    var parts = new Array(BUNDLE_CHUNKS);
+    var loadedTotal = 0;
+    var guard = stallGuard();
+
+    function job(i) {
+      var from = i * size;
+      var to = Math.min(total - 1, from + size - 1);
+      if (from > to) return Promise.resolve();
+      return fetch(BUNDLE_URL, {
+        headers: { Range: 'bytes=' + from + '-' + to },
+        cache: 'no-cache',
+        signal: guard.signal
+      }).then(function (res) {
+        if (res.status !== 206) throw new Error('服务器未按分块返回（HTTP ' + res.status + '）');
+        var last = 0;
+        return readStream(res, function (loaded) {
+          loadedTotal += loaded - last;
+          last = loaded;
+          guard.tick();
+          report('download', Math.min(total, loadedTotal), total);
+        }).then(function (buf) {
+          parts[i] = new Uint8Array(buf);
+        });
+      });
+    }
+
+    var jobs = [];
+    for (var i = 0; i < BUNDLE_CHUNKS; i++) jobs.push(job(i));
+
+    return Promise.all(jobs).then(function () {
+      guard.stop();
+      var out = new Uint8Array(total);
+      var pos = 0;
+      for (var k = 0; k < parts.length; k++) {
+        if (!parts[k]) continue;
+        out.set(parts[k], pos);
+        pos += parts[k].length;
+      }
+      if (pos !== total) throw new Error('分块拼接不完整');
+      return out.buffer;
+    }, function (err) {
+      guard.stop();
+      if (guard.stalled()) throw new Error('下载停滞超过 ' + Math.round(BUNDLE_STALL / 1000) + ' 秒');
+      throw err;
+    });
+  }
+
+  /** 下载整包：HEAD 拿长度后分块并行；服务器不支持 Range 时退回单请求 */
+  function downloadBundle() {
+    report('download', 0, 0);
+    return fetch(BUNDLE_URL, { method: 'HEAD', cache: 'no-cache' })
+      .then(function (res) {
+        var total = Number(res.headers.get('Content-Length')) || 0;
+        if (!res.ok || total <= 0) throw new Error('整包不可用（HTTP ' + res.status + '）');
+        return downloadChunked(total);
+      })
+      .catch(function () {
+        var guard = stallGuard();
+        return fetch(BUNDLE_URL, { cache: 'no-cache', signal: guard.signal }).then(function (res) {
+          if (!res.ok) throw new Error('整包不可用（HTTP ' + res.status + '）');
+          var total = Number(res.headers.get('Content-Length')) || 0;
+          return readStream(res, function (loaded) {
+            guard.tick();
+            report('download', loaded, total);
+          });
+        }).then(function (buf) {
+          guard.stop();
+          return buf;
+        }, function (err) {
+          guard.stop();
+          if (guard.stalled()) throw new Error('下载停滞超过 ' + Math.round(BUNDLE_STALL / 1000) + ' 秒');
+          throw err;
+        });
+      });
+  }
+
+  /** 解析 stored（不压缩）zip：读中央目录，返回 { 文件名: Uint8Array } */
+  function unzipStored(buffer) {
+    var bytes = new Uint8Array(buffer);
+    var view = new DataView(buffer);
+    var eocd = -1;
+    var floor = Math.max(0, bytes.length - 22 - 65535);
+
+    // EOCD 后面可能跟注释，从尾部往前找签名
+    for (var p = bytes.length - 22; p >= floor; p--) {
+      if (view.getUint32(p, true) === 0x06054b50) { eocd = p; break; }
+    }
+    if (eocd < 0) throw new Error('压缩包结构无法识别');
+
+    var decoder = global.TextDecoder ? new TextDecoder('utf-8') : null;
+    var count = view.getUint16(eocd + 10, true);
+    var offset = view.getUint32(eocd + 16, true);
+    var files = {};
+
+    for (var n = 0; n < count; n++) {
+      if (view.getUint32(offset, true) !== 0x02014b50) throw new Error('压缩包目录损坏');
+      var method = view.getUint16(offset + 10, true);
+      var size = view.getUint32(offset + 20, true);
+      var nameLen = view.getUint16(offset + 28, true);
+      var extraLen = view.getUint16(offset + 30, true);
+      var commentLen = view.getUint16(offset + 32, true);
+      var local = view.getUint32(offset + 42, true);
+      var nameBytes = bytes.subarray(offset + 46, offset + 46 + nameLen);
+      var name = decoder ? decoder.decode(nameBytes) : String.fromCharCode.apply(null, nameBytes);
+      offset += 46 + nameLen + extraLen + commentLen;
+
+      if (name.charAt(name.length - 1) === '/') continue;
+      if (method !== 0) throw new Error('压缩包内 ' + name + ' 不是 stored 格式');
+
+      if (view.getUint32(local, true) !== 0x04034b50) throw new Error('压缩包条目损坏：' + name);
+      var start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
+      files[name] = bytes.subarray(start, start + size);
+    }
+    return files;
+  }
+
+  /** 解包后转成 blob URL 交给 Tone.Sampler：采样直接从内存解码，不再发请求 */
+  function samplerFromBundle(buffer, bus) {
+    var files = unzipStored(buffer);
+    var urls = {};
+    var blobs = [];
+    var missing = [];
+
+    Object.keys(SAMPLER_URLS).forEach(function (note) {
+      var name = SAMPLER_URLS[note];
+      var data = files[name];
+      if (!data || !data.length) { missing.push(name); return; }
+      var url = URL.createObjectURL(new Blob([data], { type: 'audio/mpeg' }));
+      urls[note] = url;
+      blobs.push(url);
+    });
+
+    function release() {
+      blobs.forEach(function (url) {
+        try { URL.revokeObjectURL(url); } catch (e) { /* noop */ }
+      });
+    }
+
+    if (missing.length) {
+      release();
+      return Promise.reject(new Error('压缩包缺少 ' + missing.join('、')));
+    }
+
+    return openSampler({ urls: urls }, bus, DECODE_TIMEOUT).then(function (sampler) {
+      release(); // 采样已解码进内存，blob 可以释放
+      return sampler;
+    }, function (err) {
+      release();
+      throw err;
+    });
+  }
+
+  /** 整包加载：缓存命中直接用，否则下载后写缓存，再解包 */
+  function loadBundle(bus) {
+    return readCachedBundle().then(function (cached) {
+      if (cached && cached.byteLength) return cached;
+      return downloadBundle().then(function (buffer) {
+        if (!buffer || !buffer.byteLength) throw new Error('整包内容为空');
+        writeCachedBundle(buffer); // 不阻塞本次入声
+        return buffer;
+      });
+    }).then(function (buffer) {
+      report('unzip', 0, 0);
+      return samplerFromBundle(buffer, bus);
+    });
+  }
+
+  /**
+   * 建一个 Sampler 并等它加载完成。
+   * options 支持 { urls, baseUrl }；timeout 毫秒内没加载完就放弃，换下一个源。
+   */
+  function openSampler(options, bus, timeout) {
     return new Promise(function (resolve, reject) {
       var Tone = global.Tone;
       var timer = 0;
       var settled = false;
       var sampler = null;
+      var config = {
+        urls: options.urls,
+        attack: 0.001,
+        release: 1.15,
+        curve: 'exponential',
+        onload: ok,
+        onerror: function () { fail('采样文件加载失败'); }
+      };
+      if (options.baseUrl) config.baseUrl = options.baseUrl;
 
       function ok() {
         if (settled) return;
@@ -66,32 +341,33 @@
         reject(new Error(message));
       }
 
-      sampler = new Tone.Sampler({
-        urls: SAMPLER_URLS,
-        baseUrl: baseUrl,
-        attack: 0.001,
-        release: 1.15,
-        curve: 'exponential',
-        onload: ok,
-        onerror: function () { fail('采样文件加载失败'); }
-      });
+      sampler = new Tone.Sampler(config);
       sampler.volume.value = -2;
       sampler.connect(bus);
       // 源半通不通时会一直挂着，超时后丢弃换下一个源
-      timer = setTimeout(function () { fail('采样加载超时'); }, SOURCE_TIMEOUT);
+      timer = setTimeout(function () { fail('采样加载超时'); }, timeout);
     });
   }
 
-  /** 按 CDN → 本地的顺序加载；全部失败返回 null，失败原因记入 A.lastError */
+  /** 整包 → 本地分散采样的顺序加载；全部失败返回 null，原因记入 A.lastError */
   function loadSampler(bus) {
+    var sources = [
+      { label: '采样包 ', load: function () { return loadBundle(bus); } },
+      {
+        label: '本地采样 ', load: function () {
+          return openSampler({ urls: SAMPLER_URLS, baseUrl: LOCAL_SAMPLES }, bus, SOURCE_TIMEOUT);
+        }
+      }
+    ];
+
     function attempt(i) {
-      if (i >= SAMPLER_SOURCES.length) return Promise.resolve(null);
-      return loadSource(SAMPLER_SOURCES[i], bus).catch(function (err) {
+      if (i >= sources.length) return Promise.resolve(null);
+      return sources[i].load().catch(function (err) {
         var msg = err && err.message ? err.message : String(err);
         // 记录最后一次（本地源）的失败原因，供入场页展示
-        A.lastError = (SAMPLER_SOURCES[i] === LOCAL_SAMPLES ? '本地采样 ' : 'CDN ') + msg;
+        A.lastError = sources[i].label + msg;
         if (global.console) {
-          console.warn('[audio] 采样源不可用：' + SAMPLER_SOURCES[i] + '（' + msg + '）');
+          console.warn('[audio] ' + sources[i].label + '不可用：' + msg);
         }
         return attempt(i + 1);
       });

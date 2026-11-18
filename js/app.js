@@ -1145,7 +1145,22 @@
     function tryEnter() {
       el.enter.disabled = true;
       el.enter.textContent = '正在加载音色…';
-      setTip('正在加载全部钢琴采样，就绪后自动进入…');
+      setTip('正在加载钢琴采样包，就绪后自动进入…');
+
+      // 整包下载/解包进度：长时间等待时有百分数反馈，不至于看起来像卡死
+      Audio.onProgress = function (stage, loaded, total) {
+        if (stage === 'download') {
+          var pct = total ? Math.min(100, Math.round(loaded / total * 100)) : 0;
+          el.enter.textContent = total ? '正在下载音色 ' + pct + '%' : '正在连接…';
+          setTip('正在下载钢琴采样包' + (total ? ' ' + pct + '%' : '') + '（约 2.9MB，下载后会缓存在本机）');
+        } else if (stage === 'unzip') {
+          el.enter.textContent = '正在解压音色…';
+          setTip('正在解压钢琴采样包…');
+        } else if (stage === 'decode') {
+          el.enter.textContent = '正在解码音色…';
+          setTip('正在解码钢琴采样，马上就好…');
+        }
+      };
 
       // 关键：音频上下文必须在手势任务里同步解锁（iOS 要求），
       // 不能等采样下载完再 start，否则上下文一直是 suspended，播放无声
@@ -1163,6 +1178,7 @@
           return Audio.retrySamples();
         })
         .then(function (ok) {
+          Audio.onProgress = null;
           // 只有全部采样就绪（或彻底失败）才会走到这里；失败则留在入场页重试
           if (!ok) throw new Error(Audio.lastError || '采样加载失败');
           state.ready = true;
@@ -1172,6 +1188,7 @@
           beginPlay();
         })
         .catch(function (err) {
+          Audio.onProgress = null;
           state.entered = false;
           el.enter.disabled = false;
           el.enter.textContent = '重试加载音色';
