@@ -69,6 +69,16 @@
     if (el.tip) el.tip.textContent = text;
   }
 
+  // 手机竖屏时 CSS 会把整体旋转成横屏显示（见 style.css 末尾），
+  // 此时视口坐标与画布坐标不一致，需要用 offset 坐标换算
+  var rotateMq = global.matchMedia
+    ? global.matchMedia('(orientation: portrait) and (pointer: coarse) and (max-width: 480px)')
+    : null;
+
+  function isRotatedView() {
+    return !!(rotateMq && rotateMq.matches);
+  }
+
   /** 顶部提示条；允许受控的 <b> 标签，外部数据必须先经 escapeHtml */
   function flashHint(text) {
     if (!el.hint) return;
@@ -182,6 +192,11 @@
 
   function beginPlay() {
     if (!state.ready || !state.taskReady) return;
+    // 空曲库/载入失败时没有音符可播：避免出现“正在播放但一片空白”
+    if (!state.song || !state.song.notes || !state.song.notes.length || !(state.duration > 0)) {
+      flashHint('暂无可播放曲目：把 <b>.mid</b> 放进 assets 目录，或直接拖入文件');
+      return;
+    }
     // 采样曾加载失败时，借一次用户手势再试；成功后后续音符自动有声
     if (!Audio.isSampleMode() && typeof Audio.retrySamples === 'function') {
       Audio.retrySamples();
@@ -299,6 +314,11 @@
      ------------------------------------------------------------ */
 
   function canvasPoint(e) {
+    // 强制横屏（CSS 旋转）时，getBoundingClientRect 返回的是旋转后的包围盒，
+    // clientX/Y 相减会错位；offsetX/Y 始终相对元素自身坐标系
+    if (isRotatedView()) {
+      return { x: e.offsetX, y: e.offsetY };
+    }
     var r = el.stage.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
@@ -437,9 +457,16 @@
     var scrubbing = false;
     var resumeAfterScrub = false;
 
-    function previewAt(clientX) {
-      var r = el.progress.getBoundingClientRect();
-      var ratio = clamp((clientX - r.left) / Math.max(1, r.width), 0, 1);
+    function previewAt(e) {
+      var ratio;
+      if (isRotatedView()) {
+        // 旋转后 rect 不再对应进度槽方向，改用相对 .progress 的 offset
+        // （.track/.fill 已设 pointer-events:none，target 恒为 .progress）
+        ratio = clamp(e.offsetX / Math.max(1, el.progress.clientWidth), 0, 1);
+      } else {
+        var r = el.progress.getBoundingClientRect();
+        ratio = clamp((e.clientX - r.left) / Math.max(1, r.width), 0, 1);
+      }
       state.scrub = ratio * state.duration;
       setProgressUI(ratio);
       el.timeNow.textContent = fmt(state.scrub);
@@ -451,7 +478,7 @@
       resumeAfterScrub = state.playing;
       if (state.playing) pause();
       el.progress.setPointerCapture && el.progress.setPointerCapture(e.pointerId);
-      previewAt(e.clientX);
+      previewAt(e);
     }
 
     function endScrub(cancelled) {
@@ -468,7 +495,7 @@
 
     el.progress.addEventListener('pointerdown', beginScrub);
     el.progress.addEventListener('pointermove', function (e) {
-      if (scrubbing) previewAt(e.clientX);
+      if (scrubbing) previewAt(e);
     });
     el.progress.addEventListener('pointerup', function () { endScrub(false); });
     el.progress.addEventListener('pointercancel', function () { endScrub(true); });
@@ -519,6 +546,11 @@
   }
 
   var HAND_SPLIT = 60;   // 单轨 MIDI 没有手别信息时，C4 以下算左手
+
+  /** 当前是否已有一首真实曲目（非空骨架） */
+  function hasPlayableSong() {
+    return !!(state.song && state.song.notes && state.song.notes.length);
+  }
 
   /** 轨道名里能直接读出左右手时优先采信 */
   function handFromTrackName(name) {
@@ -722,8 +754,7 @@
 
   var library = {
     items: [],
-    manifest: {},
-    current: -1,           // -1 = 内置示范曲
+    current: -1,           // -1 = 曲库外（如外来导入的 MIDI）
     currentPath: '',       // 当前选中的 assets 文件，重扫时用它恢复选中
     reqSeq: 0              // 选择序号：丢弃过期的异步载入结果
   };
@@ -817,28 +848,20 @@
         push({ path: path, file: assetBaseName(path), title: fileNameToTitle(path), artist: '' });
       });
 
-      library.manifest = manifest;
       return items;
     });
   }
 
-  /** 默认曲目：清单 default > 文件名含 luv letter > 第一首 */
+  /** 默认曲目：资源目录里的第一首 */
   function defaultLibraryIndex(items) {
-    if (!items.length) return -1;
-    var want = assetBaseName(library.manifest.default || '');
-    var i;
-    if (want) {
-      for (i = 0; i < items.length; i++) if (items[i].file === want) return i;
-    }
-    for (i = 0; i < items.length; i++) if (/luv.?letter/i.test(items[i].file)) return i;
-    return 0;
+    return items.length ? 0 : -1;
   }
 
   /** 曲库下拉：渲染按钮文案与自绘列表 */
   function renderLibrary() {
     if (!el.songMenu || !el.songBtn || !el.songBtnText) return;
 
-    var rows = [{ index: -1, title: '内置示范曲', artist: '' }];
+    var rows = [];
     library.items.forEach(function (it, i) {
       rows.push({ index: i, title: it.title, artist: it.artist });
     });
@@ -847,10 +870,12 @@
       rows.push({ index: null, title: '（assets 暂无曲目）', artist: '', disabled: true });
     }
 
-    var current = rows[0];
+    var current = null;
     for (var i = 0; i < rows.length; i++) {
       if (rows[i].index === library.current) { current = rows[i]; break; }
     }
+    // 当前曲目不属于曲库（导入的 MIDI、载入失败等）时显示占位文案
+    if (!current) current = { title: '选择曲目', artist: '' };
     el.songBtnText.textContent = current.artist
       ? current.title + ' · ' + current.artist
       : current.title;
@@ -936,12 +961,13 @@
       });
   }
 
-  /** 切换曲库：index < 0 表示回到内置示范曲 */
+  /** 切换曲库：index 无效或曲目缺失时保持现状 */
   function selectLibraryIndex(index, silent) {
     var item = index >= 0 ? library.items[index] : null;
-    if (index >= 0 && !item) return;
-    // 用户已经进入页面后，默认曲不再异步顶掉当前内容，避免标题/时长跳变
-    if (silent && state.entered) return;
+    if (!item) return;
+    // 已进入页面且已有真实曲目时，默认曲不再异步顶掉当前内容；
+    // 空骨架阶段不能拦，否则默认曲会被永久丢弃
+    if (silent && state.entered && hasPlayableSong()) return;
     // 用户主动选曲库时，取消还在解析的拖入 MIDI
     if (!silent) importSeq++;
 
@@ -950,26 +976,16 @@
     var token = ++library.reqSeq;
     var prev = library.current;
     var prevPath = library.currentPath;
-    library.current = item ? index : -1;
-    library.currentPath = item ? item.path : '';
-
-    if (!item) {
-      renderLibrary();
-      if (state.playing) pause();
-      bindSong(global.Piece.buildSong(), null, 'Piano Solo · 内置示范曲');
-      if (silent) return;
-      flashHint('已切回 <b>内置示范曲</b>');
-      if (state.ready) beginPlay();
-      return;
-    }
+    library.current = index;
+    library.currentPath = item.path;
 
     // 静默载入不提前改菜单文字，真正应用时再一次性更新
     if (!silent) renderLibrary();
 
     loadAssetItem(item, silent).then(function (song) {
       if (token !== library.reqSeq) return;
-      // 载入期间用户已进入页面：保留当前曲目，文字不做任何变动
-      if (silent && state.entered) {
+      // 载入期间用户已进入页面且已有真实曲目在播：保留当前曲目，文字不做任何变动
+      if (silent && state.entered && hasPlayableSong()) {
         library.current = prev;
         library.currentPath = prevPath;
         return;
@@ -987,7 +1003,7 @@
       flashHint('载入 <b>' + escapeHtml(item.title) + '</b> 失败：' + escapeHtml(msg));
       // 入场页还在时，失败原因也能直接看到
       if (el.tip && !state.entered) {
-        el.tip.textContent = 'assets 曲目未能载入（' + msg + '），已使用内置示范曲';
+        el.tip.textContent = 'assets 曲目未能载入（' + msg + '）';
       }
     });
   }
@@ -1008,7 +1024,7 @@
       if (sameItems(items, library.items)) return false;
       library.items = items;
 
-      // 按路径恢复选中，文件被移除则回落到内置曲目
+      // 按路径恢复选中，文件被移除则清空选中
       var idx = -1;
       if (library.currentPath) {
         for (var i = 0; i < items.length; i++) {
@@ -1033,7 +1049,7 @@
     collectLibrary().then(function (items) {
       library.items = items;
       var defIdx = defaultLibraryIndex(items);
-      // 不预先改 current：载入失败时才能正确回滚到内置曲目
+      // 不预先改 current：载入失败时才能正确回滚
       renderLibrary();
       if (defIdx >= 0) {
         selectLibraryIndex(defIdx, true);
@@ -1134,7 +1150,7 @@
       setTip('Tone.js 加载失败，请检查网络后刷新');
       return;
     }
-    if (!global.Piece || !Audio || !Renderer) {
+    if (!Audio || !Renderer) {
       setTip('脚本加载不完整，请刷新重试');
       return;
     }
@@ -1160,11 +1176,17 @@
       }, 180);
     });
 
-    // 先摆好曲谱，让入场画面背后就是完整的键盘
-    bindSong(global.Piece.buildSong(), null, 'Piano Solo · 内置示范曲');
+    // 先用空谱面摆好完整键盘，曲库载入后自动换成默认曲目
+    bindSong({
+      title: 'Piano Solo',
+      notes: [],
+      bpm: 72,
+      beatsPerBar: 4,
+      duration: 0
+    }, '等待曲目载入', 'Asset Library · 曲库');
     state.taskReady = true;
 
-    // assets/ 里的曲目进入曲库，默认那首自动顶掉内置曲目
+    // assets/ 里的曲目进入曲库，默认曲目自动载入
     initLibrary();
 
     setTimeout(function () { if (el.hint) el.hint.classList.add('fade'); }, 16000);

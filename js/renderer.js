@@ -15,20 +15,31 @@
 
   function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+  /* 真实钢琴键盘比例（现代标准）：白键 150×23.5mm，黑键 95×13.7mm */
+  var WHITE_KEY_ASPECT = 150 / 23.5;    // 白键长宽比 ≈ 6.38
+  var BLACK_KEY_W_RATIO = 13.7 / 23.5;  // 黑键宽 ≈ 白键宽×0.583
+  var BLACK_KEY_H_RATIO = 95 / 150;     // 黑键长 ≈ 白键长×0.633
+  var WHITE_KEY_COUNT = (function () {
+    var n = 0;
+    for (var m = KEY_LOW; m <= KEY_HIGH; m++) if (!isBlackKey(m)) n++;
+    return n;
+  })();
+
   /* 配色：暖沙背景；左手蓝、右手杏黄，各自白键浅 / 黑键深，全平面无发光 */
   var COL = {
     bg: '#f5e8d6',
     ink: '59, 42, 30',
     keyW: '#fcf8f1',
     keyB: '#241c16',
-    lhWhite: '#b8dcf0',
-    lhBlack: '#5f93bd',
-    lhWhiteOn: '#a6d2ec',
-    lhBlackOn: '#6f9fc8',
-    rhWhite: '#f5d0a3',
-    rhBlack: '#cf8c46',
-    rhWhiteOn: '#f2c894',
-    rhBlackOn: '#daa05c'
+    keyTop: '#6b4c33',
+    lhWhite: '#9ed7fd',
+    lhBlack: '#4da4e6',
+    lhWhiteOn: '#8bcdfb',
+    lhBlackOn: '#64b3ec',
+    rhWhite: '#ffd68a',
+    rhBlack: '#f0a13c',
+    rhWhiteOn: '#fccb79',
+    rhBlackOn: '#f6b45c'
   };
 
   /** 音符属于哪只手：优先用解析时标注的结果，缺失时按音高分界 */
@@ -96,16 +107,21 @@
 
   R.resize = function () {
     if (!R.canvas) return;
-    var rect = R.canvas.getBoundingClientRect();
+    // 用布局尺寸而不是 getBoundingClientRect：手机竖屏被 CSS 旋转成横屏时，
+    // rect 是旋转后的轴对齐包围盒，会把画布的宽高对调
     R.dpr = Math.min(2, global.devicePixelRatio || 1);
-    R.W = Math.max(1, Math.round(rect.width));
-    R.H = Math.max(1, Math.round(rect.height));
+    R.W = Math.max(1, Math.round(R.canvas.clientWidth));
+    R.H = Math.max(1, Math.round(R.canvas.clientHeight));
     R.canvas.width = Math.round(R.W * R.dpr);
     R.canvas.height = Math.round(R.H * R.dpr);
     R.ctx.setTransform(R.dpr, 0, 0, R.dpr, 0, 0);
     R.snapshot = null;
 
-    R.keyH = clamp(R.H * 0.27, 96, 190);
+    // 键盘高度按真实白键长宽比（150:23.5）随基准键宽自适应；
+    // 屏幕矮时才压缩，避免瀑布流区域被挤没（下界不能超过上界，否则压缩失效）
+    var fitKw = R.W / WHITE_KEY_COUNT;
+    var fitH = R.H * 0.34;
+    R.keyH = Math.round(clamp(fitKw * WHITE_KEY_ASPECT, Math.min(96, fitH), fitH));
     R.hitY = R.H - R.keyH;
     R.pps = (R.hitY - 8) / R.lookAhead;
     R.layoutDirty = true;
@@ -217,7 +233,7 @@
       return;
     }
 
-    // 内置示范曲等没有小节信息时，按拍号推算
+    // 没有小节信息时，按拍号推算
     var span = R.songDuration + 8;
     var beatDur = 60 / R.bpm;
     for (var t = 0; t <= span; t += barDur) bars.push(t);
@@ -241,7 +257,7 @@
     for (var j = 0; j < whites.length; j++) {
       var next = whites[j] + 1;
       if (next <= R.high && isBlackKey(next)) {
-        var bw = kw * 0.6;
+        var bw = kw * BLACK_KEY_W_RATIO;
         map.set(next, { x: (j + 1) * kw - bw / 2, w: bw, black: true });
       }
     }
@@ -296,7 +312,7 @@
       k = R.keyMap.get(i);
       if (!k) continue;
       kx = R.viewLeft + k.x;
-      if (x >= kx && x <= kx + k.w && y <= R.hitY + R.keyH * 0.63) {
+      if (x >= kx && x <= kx + k.w && y <= R.hitY + R.keyH * BLACK_KEY_H_RATIO) {
         return { midi: i, black: true };
       }
     }
@@ -539,7 +555,7 @@
       w = k.w;
       if (x + w < -2 || x > R.W + 2) continue;
 
-      var bh = h * 0.63;
+      var bh = h * BLACK_KEY_H_RATIO;
       var bx = Math.round(x);
       var bw2 = Math.max(1, Math.round(w));
       var handB = R.glow.get(m);
@@ -557,6 +573,10 @@
       ctx.fillRect(bx, y0, bw2, bh);
       ctx.restore();
     }
+
+    // 键盘区顶部边框：2px 棕色，横贯整个键盘上沿
+    ctx.fillStyle = COL.keyTop;
+    ctx.fillRect(0, y0, R.W, 2);
   }
 
   function flashLevel(midi, now) {

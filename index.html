@@ -4,17 +4,17 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#f5e8d6">
-<title>Letters in Aether · 钢琴独奏</title>
+<title>Piano Solo · 钢琴独奏</title>
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-<link rel="stylesheet" href="css/style.css?v=32">
+<link rel="stylesheet" href="css/style.css?v=36">
 </head>
 <body>
 
 <div class="app">
   <header class="topbar">
     <div class="brand">
-      <p class="eyebrow" id="eyebrow">Piano Solo · 内置示范曲</p>
-      <h1 id="songTitle">Letters in Aether</h1>
+      <p class="eyebrow" id="eyebrow">Asset Library · 曲库</p>
+      <h1 id="songTitle">Piano Solo</h1>
     </div>
 
     <p class="meta" id="songMeta"><span id="songMetaText">原创 · 72 BPM · 4/4</span><span class="tempo-now" id="tempoNow"></span></p>
@@ -24,7 +24,7 @@
         <span class="library-label">曲库</span>
         <div class="pill library">
           <button id="songBtn" class="song-btn" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="songMenu">
-            <span id="songBtnText">内置示范曲</span>
+            <span id="songBtnText">选择曲目</span>
             <i class="caret" aria-hidden="true"></i>
           </button>
           <ul id="songMenu" class="song-menu" role="listbox" aria-label="曲目列表" hidden></ul>
@@ -48,7 +48,7 @@
 
   <main class="stage" id="stageBox">
     <canvas id="stage" role="img" aria-label="钢琴瀑布流谱面与 88 键键盘，点击琴键可试弹"></canvas>
-    <p class="hint" id="hint" role="status" aria-live="polite">拖入 <b>.mid</b> 文件可载入任意曲谱 · 曲库 可切换内置曲目 · 空格 播放/暂停 · ← → 快进快退 · 滚轮 缩放 · 拖动画面 平移 · 点击琴键 试弹</p>
+    <p class="hint" id="hint" role="status" aria-live="polite">拖入 <b>.mid</b> 文件可载入任意曲谱 · 曲库 可切换 assets 曲目 · 空格 播放/暂停 · ← → 快进快退 · 滚轮 缩放 · 拖动画面 平移 · 点击琴键 试弹</p>
   </main>
 
   <footer class="transport">
@@ -64,9 +64,10 @@
 
     <div class="time"><span id="timeNow">0:00</span><i>/</i><span id="timeTotal">0:00</span></div>
   </footer>
-</div>
 
-<div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <!-- toast 放在 .app 内，随旋转容器一起旋转（position:absolute 相对 .app） -->
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</div>
 
 <div class="splash" id="splash">
   <div class="splash-inner">
@@ -79,9 +80,8 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/tone@15.1.22/build/Tone.js"></script>
-<script src="js/piece.js?v=32"></script>
 <script src="js/audio.js?v=32"></script>
-<script src="js/renderer.js?v=32"></script>
-<script src="js/app.js?v=32"></script>
+<script src="js/renderer.js?v=38"></script>
+<script src="js/app.js?v=35"></script>
 </body>
 </html>

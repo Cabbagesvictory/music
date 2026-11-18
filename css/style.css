@@ -478,6 +478,8 @@ input[type="range"]::-moz-range-thumb {
   height: 2px;
   background: rgba(59, 42, 30, 0.15);
   overflow: hidden;
+  /* 让 pointer 事件落在 .progress 上，offsetX 才能按整条进度槽取值 */
+  pointer-events: none;
 }
 
 .progress .fill {
@@ -600,7 +602,7 @@ body.dragging .stage::after {
 /* ------------------------------ 顶部提示 ------------------------------ */
 
 .toast {
-  position: fixed;
+  position: absolute;
   top: 20px;
   left: 50%;
   z-index: 40;
@@ -643,4 +645,81 @@ body.dragging .stage::after {
     max-height: 4.5em;
     overflow: hidden;
   }
+}
+
+/* ------------------------------ 手机 · 强制横屏 ------------------------------ */
+
+/* 竖屏手机：整个界面旋转 90°（顺时针），始终以横屏布局呈现 */
+@media (orientation: portrait) and (pointer: coarse) and (max-width: 480px) {
+  .app,
+  .splash {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: auto;
+    bottom: auto;
+    width: 100vh;
+    height: 100vw;
+    transform-origin: 0 0;
+    transform: translateX(100vw) rotate(90deg);
+  }
+}
+
+@supports (height: 100dvh) {
+  @media (orientation: portrait) and (pointer: coarse) and (max-width: 480px) {
+    .app,
+    .splash {
+      width: 100dvh;
+      height: 100dvw;
+      transform: translateX(100dvw) rotate(90deg);
+    }
+  }
+}
+
+/* 手机横屏（含竖屏旋转后的等效横屏）：组件按屏宽比例收紧 */
+@media (pointer: coarse) and (max-height: 520px),
+       (pointer: coarse) and (orientation: portrait) and (max-width: 480px) {
+  .topbar {
+    padding: 12px 16px 2px;
+    column-gap: 12px;
+    /* 工具列（曲库 + 音量）占大头，曲库胶囊才能按屏宽比例撑开 */
+    grid-template-columns: minmax(0, 4fr) minmax(0, 6fr);
+  }
+  .eyebrow { font-size: 9px; margin-bottom: 5px; letter-spacing: 0.3em; }
+  .brand h1 { font-size: 20px; max-width: none; }
+  .meta { display: none; }
+  .library-label { display: none; }
+  .library-group { flex: 1 1 auto; min-width: 0; }
+  .library { min-width: 0; padding: 3px 10px; }
+  /* 旋转容器里 backdrop-filter 会采样出错、整块发糊，移动端改用实色背景 */
+  .pill,
+  .song-menu,
+  .vol-panel {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  .pill { background: rgba(255, 250, 243, 0.92); }
+  .song-menu,
+  .vol-panel { background: #fffdf8; }
+  .song-btn { font-size: 11px; }
+  .song-menu { max-height: 42vh; max-height: min(42vh, 42vw); }
+  /* 小屏也保留提示条：采样失败、曲目载入失败等错误全靠它展示 */
+  .hint {
+    top: 2px;
+    padding: 0 12px;
+    font-size: 10px;
+    line-height: 1.5;
+    max-height: 4.5em;
+    overflow: hidden;
+  }
+  .transport { padding: 4px 16px 10px; gap: 14px; }
+  .play { width: 42px; height: 42px; }
+  .play svg { width: 17px; height: 17px; }
+  .time { font-size: 11px; }
+  .vol-panel { width: 44px; height: 118px; }
+  .vol-panel input[type="range"] { width: 96px; }
+  .splash h1 { font-size: clamp(30px, 9vmin, 46px); }
+  .splash .sub { font-size: 11px; letter-spacing: 0.28em; }
+  .enter { margin-top: 22px; padding: 12px 32px; }
+  .tip { margin-top: 14px; }
 }
