@@ -29,7 +29,7 @@
     'https://cdn.jsdelivr.net/gh/nbrosowsky/tonejs-instruments@master/samples/piano/',
     LOCAL_SAMPLES
   ];
-  var SOURCE_TIMEOUT = 4000; // 单个采样源的最长等待，超时就换下一个源
+  var SOURCE_TIMEOUT = 12000; // 单个采样源的最长等待：CDN 慢网络给足时间，超时才换下一个源
 
   var A = {
     ready: false,
@@ -73,23 +73,25 @@
         release: 1.15,
         curve: 'exponential',
         onload: ok,
-        onerror: function () { fail('取样失败'); }
+        onerror: function () { fail('采样文件加载失败'); }
       });
       sampler.volume.value = -2;
       sampler.connect(bus);
-      // 源半通不通时会一直挂着，超时后丢弃它换下一个
-      timer = setTimeout(function () { fail('取样超时'); }, SOURCE_TIMEOUT);
+      // 源半通不通时会一直挂着，超时后丢弃换下一个源
+      timer = setTimeout(function () { fail('采样加载超时'); }, SOURCE_TIMEOUT);
     });
   }
 
-  /** 按 CDN → 本地的顺序加载；全部失败返回 null */
+  /** 按 CDN → 本地的顺序加载；全部失败返回 null，失败原因记入 A.lastError */
   function loadSampler(bus) {
     function attempt(i) {
       if (i >= SAMPLER_SOURCES.length) return Promise.resolve(null);
       return loadSource(SAMPLER_SOURCES[i], bus).catch(function (err) {
+        var msg = err && err.message ? err.message : String(err);
+        // 记录最后一次（本地源）的失败原因，供入场页展示
+        A.lastError = (SAMPLER_SOURCES[i] === LOCAL_SAMPLES ? '本地采样 ' : 'CDN ') + msg;
         if (global.console) {
-          console.warn('[audio] 采样源不可用：' + SAMPLER_SOURCES[i] +
-            '（' + (err && err.message ? err.message : err) + '）');
+          console.warn('[audio] 采样源不可用：' + SAMPLER_SOURCES[i] + '（' + msg + '）');
         }
         return attempt(i + 1);
       });
@@ -125,6 +127,7 @@
           if (sampler) {
             A.sampler = sampler;
             A.mode = 'samples';
+            A.lastError = '';
           } else {
             A.mode = 'none';
           }
@@ -152,6 +155,7 @@
       if (sampler) {
         A.sampler = sampler;
         A.mode = 'samples';
+        A.lastError = '';
       }
       return !!sampler;
     }, function () {

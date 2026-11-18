@@ -198,9 +198,14 @@
       flashHint('暂无可播放曲目：把 <b>.mid</b> 放进 assets 目录，或直接拖入文件');
       return;
     }
-    // 采样曾加载失败时，借一次用户手势再试；成功后后续音符自动有声
-    if (!Audio.isSampleMode() && typeof Audio.retrySamples === 'function') {
-      Audio.retrySamples();
+    // 采样未就绪：先把音色全部加载好再起播，避免“正在播放却没有声音”
+    if (!Audio.isSampleMode()) {
+      flashHint('正在加载钢琴音色…');
+      Audio.retrySamples().then(function (ok) {
+        if (ok) beginPlay();
+        else flashHint('钢琴音色加载失败（' + escapeHtml(Audio.lastError || '未知原因') + '），请检查网络后重试');
+      });
+      return;
     }
     if (state.duration > 0 && getPos() >= state.duration - 0.2) seek(0);
     else setPosition(getPos());
@@ -1137,33 +1142,46 @@
   }
 
   function bindSplash() {
+    function tryEnter() {
+      el.enter.disabled = true;
+      el.enter.textContent = '正在加载音色…';
+      setTip('正在加载全部钢琴采样，就绪后自动进入…');
+
+      // 关键：音频上下文必须在手势任务里同步解锁（iOS 要求），
+      // 不能等采样下载完再 start，否则上下文一直是 suspended，播放无声
+      if (global.Tone && typeof global.Tone.start === 'function') {
+        try {
+          var unlock = global.Tone.start();
+          if (unlock && unlock.catch) unlock.catch(function () { /* 后续 init 统一处理 */ });
+        } catch (e) { /* noop */ }
+      }
+
+      Audio.init()
+        .then(function () {
+          if (Audio.isSampleMode()) return true;
+          // init 完成但采样曾全部失败：借这次手势再试一次
+          return Audio.retrySamples();
+        })
+        .then(function (ok) {
+          // 只有全部采样就绪（或彻底失败）才会走到这里；失败则留在入场页重试
+          if (!ok) throw new Error(Audio.lastError || '采样加载失败');
+          state.ready = true;
+          state.entered = true;
+          el.play.disabled = false;
+          hideSplash();
+          beginPlay();
+        })
+        .catch(function (err) {
+          state.entered = false;
+          el.enter.disabled = false;
+          el.enter.textContent = '重试加载音色';
+          setTip('音色加载失败：' + (err && err.message ? err.message : err) + ' · 请检查网络后点击重试');
+        });
+    }
+
     el.enter.addEventListener('click', function () {
       if (state.entered) return;
-      state.entered = true;
-      el.enter.disabled = true;
-      setTip('正在唤醒钢琴…');
-
-      Audio.init().then(function () {
-        state.ready = true;
-        el.play.disabled = false;
-        hideSplash();
-        if (Audio.isSampleMode()) {
-          beginPlay();
-        } else {
-          // 没有采样就保持静音，不自动播放一首无声的曲子
-          flashHint('钢琴采样加载失败（CDN 与本地均不可用），请检查网络或 assets/piano 后刷新 · 拖入 <b>.mid</b> 可载入任意曲谱');
-          // 网络恢复时自动再试一次，不必刷新页面
-          setTimeout(function () {
-            Audio.retrySamples().then(function (ok) {
-              if (ok) flashHint('钢琴采样已恢复，可以开始播放');
-            });
-          }, 2500);
-        }
-      }).catch(function (err) {
-        state.entered = false;
-        el.enter.disabled = false;
-        setTip('音频启动失败：' + (err && err.message ? err.message : err));
-      });
+      tryEnter();
     });
   }
 
@@ -1172,12 +1190,18 @@
      ------------------------------------------------------------ */
 
   function boot() {
-    if (!Tone) {
-      setTip('Tone.js 加载失败，请检查网络后刷新');
-      return;
-    }
     if (!Audio || !Renderer) {
       setTip('脚本加载不完整，请刷新重试');
+      return;
+    }
+    if (!Tone) {
+      // Tone.js 没就绪时按钮照常可点：点击给出明确提示，避免“点了没反应”
+      setTip('Tone.js 加载失败，请检查网络后刷新');
+      if (el.enter) {
+        el.enter.addEventListener('click', function () {
+          setTip('Tone.js 加载失败（CDN 不可用），请检查网络后刷新页面');
+        });
+      }
       return;
     }
 
