@@ -359,6 +359,12 @@ body {
 
 .song-item.disabled:hover { background: transparent; }
 
+/* 曲库首行：自定义 MIDI 上传入口，与资源曲目用分隔线区分 */
+.song-item.custom {
+  border-bottom: 1px solid rgba(59, 42, 30, 0.12);
+  margin-bottom: 4px;
+}
+
 input[type="range"] {
   -webkit-appearance: none;
   appearance: none;

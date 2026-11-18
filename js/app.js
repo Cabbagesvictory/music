@@ -30,7 +30,8 @@
     toast: $('#toast'),
     songBtn: $('#songBtn'),
     songMenu: $('#songMenu'),
-    songBtnText: $('#songBtnText')
+    songBtnText: $('#songBtnText'),
+    midFile: $('#midFile')
   };
 
   var Tone = global.Tone;
@@ -500,6 +501,15 @@
     el.progress.addEventListener('pointerup', function () { endScrub(false); });
     el.progress.addEventListener('pointercancel', function () { endScrub(true); });
 
+    // 自定义 MIDI：下拉首行触发隐藏文件选择器，解析流程与拖拽一致
+    if (el.midFile) {
+      el.midFile.addEventListener('change', function () {
+        var f = el.midFile.files && el.midFile.files[0];
+        el.midFile.value = '';   // 清空，允许重复选同一文件
+        if (f) loadMidiFile(f);
+      });
+    }
+
     global.addEventListener('keydown', function (e) {
       if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
       if (e.code === 'Space') {
@@ -735,12 +745,13 @@
       .then(function (midi) {
         if (token !== importSeq) return null;   // 已被后一次拖入取代
         var song = midiToSong(midi, file.name);
-        // 导入的谱面不再属于 assets 曲库，同时取消还在飞的曲库载入
+        // 自定义谱面不属于 assets 曲库，同时取消还在飞的曲库载入
         library.reqSeq++;
-        library.current = -1;
+        library.customName = song.title;
+        library.current = 'custom';
         library.currentPath = '';
         renderLibrary();
-        return applyMidiSong(song, file.name);
+        return applyMidiSong(song, file.name, '', 'Custom MIDI · 自定义');
       })
       .catch(function (err) {
         if (token !== importSeq) return;
@@ -754,8 +765,9 @@
 
   var library = {
     items: [],
-    current: -1,           // -1 = 曲库外（如外来导入的 MIDI）
+    current: -1,           // -1 = 曲库外；'custom' = 上传的自定义 MIDI
     currentPath: '',       // 当前选中的 assets 文件，重扫时用它恢复选中
+    customName: '',        // 已上传的自定义曲名，用于下拉与按钮文案
     reqSeq: 0              // 选择序号：丢弃过期的异步载入结果
   };
 
@@ -861,7 +873,13 @@
   function renderLibrary() {
     if (!el.songMenu || !el.songBtn || !el.songBtnText) return;
 
-    var rows = [];
+    // 上传入口常驻首行：随时可载入本地 .mid
+    var rows = [{
+      index: 'custom',
+      custom: true,
+      title: library.customName ? '自定义 · ' + library.customName : '自定义 MIDI…',
+      artist: ''
+    }];
     library.items.forEach(function (it, i) {
       rows.push({ index: i, title: it.title, artist: it.artist });
     });
@@ -886,7 +904,7 @@
     var html = '';
     rows.forEach(function (r) {
       var on = r.index === library.current;
-      html += '<li class="song-item' + (r.disabled ? ' disabled' : '') + (on ? ' on' : '') + '"' +
+      html += '<li class="song-item' + (r.custom ? ' custom' : '') + (r.disabled ? ' disabled' : '') + (on ? ' on' : '') + '"' +
         ' role="option" tabindex="-1" aria-selected="' + (on ? 'true' : 'false') + '"' +
         (r.disabled ? ' aria-disabled="true"' : ' data-index="' + r.index + '"') + '>' +
         '<span class="t">' + escapeHtml(r.title) + '</span>' +
@@ -926,8 +944,14 @@
 
   function chooseLibraryItem(li) {
     if (!li || li.classList.contains('disabled') || !li.hasAttribute('data-index')) return;
-    var idx = parseInt(li.getAttribute('data-index'), 10);
+    var raw = li.getAttribute('data-index');
     closeLibrary(true);
+    // 首行自定义入口：打开隐藏的文件选择器，选中后复用拖拽的解析流程
+    if (raw === 'custom') {
+      if (el.midFile) el.midFile.click();
+      return;
+    }
+    var idx = parseInt(raw, 10);
     selectLibraryIndex(isNaN(idx) ? -1 : idx);
   }
 
@@ -1024,15 +1048,17 @@
       if (sameItems(items, library.items)) return false;
       library.items = items;
 
-      // 按路径恢复选中，文件被移除则清空选中
+      // 按路径恢复选中，文件被移除则清空选中；自定义曲目保持选中
       var idx = -1;
-      if (library.currentPath) {
-        for (var i = 0; i < items.length; i++) {
-          if (items[i].path === library.currentPath) { idx = i; break; }
+      if (library.current !== 'custom') {
+        if (library.currentPath) {
+          for (var i = 0; i < items.length; i++) {
+            if (items[i].path === library.currentPath) { idx = i; break; }
+          }
         }
+        library.current = idx;
+        if (idx < 0) library.currentPath = '';
       }
-      library.current = idx;
-      if (idx < 0) library.currentPath = '';
       renderLibrary();
 
       if (global.console) console.info('[library] 曲库已更新，共 ' + items.length + ' 首');

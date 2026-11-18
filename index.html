@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#f5e8d6">
 <title>Piano Solo · 钢琴独奏</title>
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-<link rel="stylesheet" href="css/style.css?v=36">
+<link rel="stylesheet" href="css/style.css?v=37">
 </head>
 <body>
 
@@ -29,6 +29,7 @@
           </button>
           <ul id="songMenu" class="song-menu" role="listbox" aria-label="曲目列表" hidden></ul>
         </div>
+        <input id="midFile" type="file" accept=".mid,.midi,audio/midi,audio/x-midi" hidden>
       </div>
 
       <div class="pill vol">
@@ -48,7 +49,6 @@
 
   <main class="stage" id="stageBox">
     <canvas id="stage" role="img" aria-label="钢琴瀑布流谱面与 88 键键盘，点击琴键可试弹"></canvas>
-    <p class="hint" id="hint" role="status" aria-live="polite">拖入 <b>.mid</b> 文件可载入任意曲谱 · 曲库 可切换 assets 曲目 · 空格 播放/暂停 · ← → 快进快退 · 滚轮 缩放 · 拖动画面 平移 · 点击琴键 试弹</p>
   </main>
 
   <footer class="transport">
@@ -82,6 +82,6 @@
 <script src="https://cdn.jsdelivr.net/npm/tone@15.1.22/build/Tone.js"></script>
 <script src="js/audio.js?v=32"></script>
 <script src="js/renderer.js?v=38"></script>
-<script src="js/app.js?v=35"></script>
+<script src="js/app.js?v=36"></script>
 </body>
 </html>
