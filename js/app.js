@@ -198,12 +198,12 @@
       flashHint('暂无可播放曲目：把 <b>.mid</b> 放进 assets 目录，或直接拖入文件');
       return;
     }
-    // 采样未就绪：先把音色全部加载好再起播，避免“正在播放却没有声音”
+    // 采样未就绪：先把音源全部加载好再起播，避免“正在播放却没有声音”
     if (!Audio.isSampleMode()) {
-      flashHint('正在加载钢琴音色…');
+      flashHint('正在加载音源…');
       Audio.retrySamples().then(function (ok) {
         if (ok) beginPlay();
-        else flashHint('钢琴音色加载失败（' + escapeHtml(Audio.lastError || '未知原因') + '），请检查网络后重试');
+        else flashHint('钢琴音源加载失败（' + escapeHtml(Audio.lastError || '未知原因') + '），请检查网络后重试');
       });
       return;
     }
@@ -548,12 +548,24 @@
     return (b[8] << 8) | b[9];
   }
 
+  var MIDI_MODULE_URLS = [
+    'https://cdn.jsdmirror.com/npm/@tonejs/midi@2.0.28/+esm',
+    'https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/+esm'
+  ];
+
+  /** 优先国内镜像，失败再回落到 jsDelivr 主站 */
+  function importMidiModule() {
+    return import(MIDI_MODULE_URLS[0]).catch(function () {
+      return import(MIDI_MODULE_URLS[1]);
+    });
+  }
+
   function parseMidi(buf) {
     // format 2 是多段互不相关的序列，叠到同一条时间线上会完全乱掉，直接拒绝
     if (midiFormatOf(buf) === 2) {
       return Promise.reject(new Error('暂不支持 format 2（多序列）MIDI'));
     }
-    return import('https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/+esm').then(function (mod) {
+    return importMidiModule().then(function (mod) {
       var Midi = mod.Midi || (mod.default && mod.default.Midi);
       if (!Midi) throw new Error('MIDI 解析器不可用');
       return new Midi(buf);
@@ -1144,21 +1156,21 @@
   function bindSplash() {
     function tryEnter() {
       el.enter.disabled = true;
-      el.enter.textContent = '正在加载音色…';
-      setTip('正在加载钢琴采样包，就绪后自动进入…');
+      el.enter.textContent = '正在加载音源…';
+      setTip('正在加载钢琴音源，就绪后自动进入…');
 
       // 整包下载/解包进度：长时间等待时有百分数反馈，不至于看起来像卡死
       Audio.onProgress = function (stage, loaded, total) {
         if (stage === 'download') {
           var pct = total ? Math.min(100, Math.round(loaded / total * 100)) : 0;
-          el.enter.textContent = total ? '正在下载音色 ' + pct + '%' : '正在连接…';
-          setTip('正在下载钢琴采样包' + (total ? ' ' + pct + '%' : '') + '（约 2.9MB，下载后会缓存在本机）');
+          el.enter.textContent = total ? '正在加载音源 ' + pct + '%' : '正在连接音源…';
+          setTip('正在加载钢琴音源' + (total ? ' ' + pct + '%' : '') + '（约 2.9MB，下载后会缓存在本机）');
         } else if (stage === 'unzip') {
-          el.enter.textContent = '正在解压音色…';
-          setTip('正在解压钢琴采样包…');
+          el.enter.textContent = '正在解压音源…';
+          setTip('正在解压钢琴音源…');
         } else if (stage === 'decode') {
-          el.enter.textContent = '正在解码音色…';
-          setTip('正在解码钢琴采样，马上就好…');
+          el.enter.textContent = '正在解码音源…';
+          setTip('正在解码钢琴音源，马上就好…');
         }
       };
 
@@ -1191,8 +1203,8 @@
           Audio.onProgress = null;
           state.entered = false;
           el.enter.disabled = false;
-          el.enter.textContent = '重试加载音色';
-          setTip('音色加载失败：' + (err && err.message ? err.message : err) + ' · 请检查网络后点击重试');
+          el.enter.textContent = '重试加载音源';
+          setTip('音源加载失败：' + (err && err.message ? err.message : err) + ' · 请检查网络后点击重试');
         });
     }
 

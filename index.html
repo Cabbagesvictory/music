@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#f5e8d6">
 <title>Piano Solo · 钢琴独奏</title>
+<link rel="preconnect" href="https://cdn.jsdmirror.com" crossorigin>
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <link rel="stylesheet" href="css/style.css?v=37">
 </head>
@@ -75,13 +76,14 @@
     <h1>Luv Letter</h1>
     <p class="sub">DJ OKAWARI · 钢琴独奏</p>
     <button id="enterBtn" class="enter">开 始 聆 听</button>
-    <p class="tip" id="splashTip">首次进入需加载钢琴采样音色</p>
+    <p class="tip" id="splashTip">首次进入需加载钢琴音源</p>
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/tone@15.1.22/build/Tone.js"></script>
-<script src="js/audio.js?v=34"></script>
+<script src="https://cdn.jsdmirror.com/npm/tone@15.1.22/build/Tone.js"></script>
+<script>window.Tone || document.write('<script src="https://cdn.jsdelivr.net/npm/tone@15.1.22/build/Tone.js"><\/script>');</script>
+<script src="js/audio.js?v=35"></script>
 <script src="js/renderer.js?v=38"></script>
-<script src="js/app.js?v=38"></script>
+<script src="js/app.js?v=39"></script>
 </body>
 </html>

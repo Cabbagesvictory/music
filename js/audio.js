@@ -1,8 +1,8 @@
 /* ===========================================================
    audio.js — 钢琴音频引擎
-   采样优先整包加载：assets/piano.zip 一次请求（内部 6 路 Range 分块并行），
+   采样优先从国内 CDN 加载整包：assets/piano.zip 一次请求（内部 6 路 Range 分块并行），
    解包后以 blob URL 直接喂给 Tone.Sampler，并写入 Cache Storage 供二次访问复用；
-   整包不可用时回落到 assets/piano/ 下的分散采样。
+   CDN 不可用时回落到 GitHub Pages 上的同一个整包，再回落到分散采样。
    所有采样源都不可用时保持静音，不使用合成音色。
    =========================================================== */
 (function (global) {
@@ -32,8 +32,22 @@
   // 一并刷新浏览器 HTTP 缓存和 Cache Storage 里的旧包
   var BUNDLE_VERSION = '1';
   var BUNDLE_URL = absolutize('assets/piano.zip?v=' + BUNDLE_VERSION);
+
+  // 国内镜像 / 全球节点 / jsDelivr 主站（原 CDN）三路都在，进页面时并行测速，
+  // 谁快用谁：国内会落在国内镜像，海外会落在全球节点，任何一个失败都还有本地兜底。
+  // 仓库名 / 分支改名后需要同步这里。
+  var CDN_REPO = 'Cabbagesvictory/music';
+  var CDN_REF = 'master';
+  var CDN_BASES = [
+    { label: '国内 CDN 采样包', base: 'https://cdn.jsdmirror.com/gh/' + CDN_REPO + '@' + CDN_REF + '/assets/' },
+    { label: '全球 CDN 采样包', base: 'https://gcore.jsdelivr.net/gh/' + CDN_REPO + '@' + CDN_REF + '/assets/' },
+    { label: 'jsDelivr 采样包', base: 'https://cdn.jsdelivr.net/gh/' + CDN_REPO + '@' + CDN_REF + '/assets/' }
+  ];
+  var PROBE_BYTES = 32768;    // 测速只取前 32KB，按拿到数据的耗时判断节点快慢
+  var PROBE_TIMEOUT = 4000;   // 单个节点测速上限，超时视为不可用
+
   var BUNDLE_CACHE = 'piano-bundle';
-  var BUNDLE_CHUNKS = 6;      // GitHub Pages 走 HTTP/1.1，6 路分块正好吃满浏览器并发
+  var BUNDLE_CHUNKS = 6;      // HTTP/1.1 下 6 路分块正好吃满浏览器单域并发
   var BUNDLE_STALL = 25000;   // 下载停滞超过 25s 判定失败，交给下一个源
   var DECODE_TIMEOUT = 30000; // 整包到手后浏览器解码的最长等待
   var SOURCE_TIMEOUT = 45000; // 兜底的分散采样：弱网也给足时间，不抢先超时
@@ -133,8 +147,67 @@
     };
   }
 
+  function bundleUrl(base) {
+    return base + 'piano.zip?v=' + BUNDLE_VERSION;
+  }
+
+  /** 取前 32KB 测速：拿到数据即算该节点可用，超时 / 非 2xx 都算失败 */
+  function probeBase(cdn, ac) {
+    var timer = ac ? setTimeout(function () {
+      try { ac.abort(); } catch (e) { /* noop */ }
+    }, PROBE_TIMEOUT) : 0;
+
+    function done() { if (timer) clearTimeout(timer); }
+
+    return fetch(bundleUrl(cdn.base), {
+      headers: { Range: 'bytes=0-' + (PROBE_BYTES - 1) },
+      cache: 'no-cache',
+      signal: ac ? ac.signal : undefined
+    }).then(function (res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.arrayBuffer();
+    }).then(function (buf) {
+      done();
+      if (!buf || buf.byteLength < 1024) throw new Error('探测数据不足');
+    }, function (err) {
+      done();
+      throw err;
+    });
+  }
+
+  /**
+   * 并行测速挑最快节点：国内镜像、全球节点、原 jsDelivr 主站一起探，
+   * 最先拿到 32KB 的胜出，其余探测立即中止；全部失败返回 null 交给本地兜底。
+   */
+  function pickCdn() {
+    return new Promise(function (resolve) {
+      var pending = CDN_BASES.length;
+      var settled = false;
+      var probes = [];
+
+      CDN_BASES.forEach(function (cdn) {
+        var ac = global.AbortController ? new AbortController() : null;
+        probes.push(ac);
+
+        probeBase(cdn, ac).then(function () {
+          if (settled) return;
+          settled = true;
+          probes.forEach(function (other) {
+            if (other && other !== ac) {
+              try { other.abort(); } catch (e) { /* noop */ }
+            }
+          });
+          resolve(cdn);
+        }, function () {
+          pending--;
+          if (!settled && pending === 0) resolve(null);
+        });
+      });
+    });
+  }
+
   /** 按总长度切 6 段并发 Range 下载；任意一段失败即整体失败 */
-  function downloadChunked(total) {
+  function downloadChunked(total, url) {
     // 没有 AbortController 就无法在停滞时中断分块，直接交给整体下载
     if (!global.AbortController) return Promise.reject(new Error('环境不支持分块取消'));
 
@@ -147,7 +220,7 @@
       var from = i * size;
       var to = Math.min(total - 1, from + size - 1);
       if (from > to) return Promise.resolve();
-      return fetch(BUNDLE_URL, {
+      return fetch(url, {
         headers: { Range: 'bytes=' + from + '-' + to },
         cache: 'no-cache',
         signal: guard.signal
@@ -187,17 +260,17 @@
   }
 
   /** 下载整包：HEAD 拿长度后分块并行；服务器不支持 Range 时退回单请求 */
-  function downloadBundle() {
+  function downloadBundle(url) {
     report('download', 0, 0);
-    return fetch(BUNDLE_URL, { method: 'HEAD', cache: 'no-cache' })
+    return fetch(url, { method: 'HEAD', cache: 'no-cache' })
       .then(function (res) {
         var total = Number(res.headers.get('Content-Length')) || 0;
         if (!res.ok || total <= 0) throw new Error('整包不可用（HTTP ' + res.status + '）');
-        return downloadChunked(total);
+        return downloadChunked(total, url);
       })
       .catch(function () {
         var guard = stallGuard();
-        return fetch(BUNDLE_URL, { cache: 'no-cache', signal: guard.signal }).then(function (res) {
+        return fetch(url, { cache: 'no-cache', signal: guard.signal }).then(function (res) {
           if (!res.ok) throw new Error('整包不可用（HTTP ' + res.status + '）');
           var total = Number(res.headers.get('Content-Length')) || 0;
           return readStream(res, function (loaded) {
@@ -291,11 +364,11 @@
     });
   }
 
-  /** 整包加载：缓存命中直接用，否则下载后写缓存，再解包 */
-  function loadBundle(bus) {
+  /** 整包加载：缓存命中直接用，否则从 url 下载后写缓存，再解包 */
+  function loadBundle(bus, url) {
     return readCachedBundle().then(function (cached) {
       if (cached && cached.byteLength) return cached;
-      return downloadBundle().then(function (buffer) {
+      return downloadBundle(url).then(function (buffer) {
         if (!buffer || !buffer.byteLength) throw new Error('整包内容为空');
         writeCachedBundle(buffer); // 不阻塞本次入声
         return buffer;
@@ -349,30 +422,56 @@
     });
   }
 
-  /** 整包 → 本地分散采样的顺序加载；全部失败返回 null，原因记入 A.lastError */
+  /** 测速选节点 → CDN 整包 → CDN 分散采样 → 本地整包 → 本地分散采样；全部失败返回 null */
   function loadSampler(bus) {
-    var sources = [
-      { label: '采样包 ', load: function () { return loadBundle(bus); } },
-      {
-        label: '本地采样 ', load: function () {
+    return pickCdn().then(function (best) {
+      var sources = [];
+
+      // 测速最快的节点优先；国内是镜像，海外是全球节点或原 jsDelivr 主站
+      if (best) {
+        if (global.console) console.info('[audio] 音源节点：' + best.label + ' ' + best.base);
+        sources.push({
+          label: best.label, load: function () { return loadBundle(bus, bundleUrl(best.base)); }
+        });
+      }
+
+      // 该节点取不到整包时，其余 CDN 依次再试
+      CDN_BASES.forEach(function (cdn) {
+        if (best && cdn.base === best.base) return;
+        sources.push({
+          label: cdn.label, load: function () { return loadBundle(bus, bundleUrl(cdn.base)); }
+        });
+      });
+
+      // 整包都异常时，改用同一个 CDN 上的分散采样
+      sources.push({
+        label: 'CDN 分散采样', load: function () {
+          return openSampler({ urls: SAMPLER_URLS, baseUrl: (best || CDN_BASES[0]).base + 'piano/' }, bus, SOURCE_TIMEOUT);
+        }
+      });
+
+      // CDN 都不通时回落到 GitHub Pages 上的同一份资源
+      sources.push({ label: '本地采样包', load: function () { return loadBundle(bus, BUNDLE_URL); } });
+      sources.push({
+        label: '本地采样', load: function () {
           return openSampler({ urls: SAMPLER_URLS, baseUrl: LOCAL_SAMPLES }, bus, SOURCE_TIMEOUT);
         }
-      }
-    ];
-
-    function attempt(i) {
-      if (i >= sources.length) return Promise.resolve(null);
-      return sources[i].load().catch(function (err) {
-        var msg = err && err.message ? err.message : String(err);
-        // 记录最后一次（本地源）的失败原因，供入场页展示
-        A.lastError = sources[i].label + msg;
-        if (global.console) {
-          console.warn('[audio] ' + sources[i].label + '不可用：' + msg);
-        }
-        return attempt(i + 1);
       });
-    }
-    return attempt(0);
+
+      function attempt(i) {
+        if (i >= sources.length) return Promise.resolve(null);
+        return sources[i].load().catch(function (err) {
+          var msg = err && err.message ? err.message : String(err);
+          // 记录最后一次（本地分散采样）的失败原因，供入场页展示
+          A.lastError = sources[i].label + '不可用：' + msg;
+          if (global.console) {
+            console.warn('[audio] ' + sources[i].label + '不可用：' + msg);
+          }
+          return attempt(i + 1);
+        });
+      }
+      return attempt(0);
+    });
   }
 
   /** 初始化音频图。必须在用户手势中调用（内部会 resume AudioContext）。 */
