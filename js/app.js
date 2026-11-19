@@ -80,6 +80,42 @@
     return !!(rotateMq && rotateMq.matches);
   }
 
+  /* ------------------------------------------------------------
+     手机真全屏：Fullscreen API 隐藏状态栏 / 浏览器栏，并锁定横屏。
+     不支持时（如 iOS Safari）保持原有 CSS 旋转布局，功能不受影响。
+     ------------------------------------------------------------ */
+
+  function fullscreenElement() {
+    return document.fullscreenElement || document.webkitFullscreenElement || null;
+  }
+
+  function isCoarsePointer() {
+    return !!(global.matchMedia && global.matchMedia('(pointer: coarse)').matches);
+  }
+
+  /** 必须在用户手势里同步调用；被系统拒绝时静默保持现状 */
+  function enterFullscreen() {
+    if (!isCoarsePointer() || fullscreenElement()) return;
+    var root = document.documentElement;
+    var request = root.requestFullscreen || root.webkitRequestFullscreen;
+    if (!request) return;
+    try {
+      var result = request.call(root, { navigationUI: 'hide' });
+      if (result && result.catch) result.catch(function () { /* noop */ });
+    } catch (e) { /* noop */ }
+  }
+
+  /** 进入全屏后才能锁定横屏；不支持的浏览器静默跳过 */
+  function lockLandscape() {
+    if (!fullscreenElement()) return;
+    try {
+      var orientation = global.screen && global.screen.orientation;
+      if (!orientation || typeof orientation.lock !== 'function') return;
+      var result = orientation.lock('landscape');
+      if (result && result.catch) result.catch(function () { /* noop */ });
+    } catch (e) { /* noop */ }
+  }
+
   /** 顶部提示条；允许受控的 <b> 标签，外部数据必须先经 escapeHtml */
   function flashHint(text) {
     if (!el.hint) return;
@@ -387,7 +423,11 @@
      ------------------------------------------------------------ */
 
   function bindControls() {
-    el.play.addEventListener('click', togglePlay);
+    el.play.addEventListener('click', function () {
+      // 用户退出全屏后再点播放时自动补回全屏（仅手机，桌面端为空操作）
+      enterFullscreen();
+      togglePlay();
+    });
 
     el.volume.addEventListener('input', function () {
       var v = Number(el.volume.value) / 100;
@@ -1155,6 +1195,8 @@
 
   function bindSplash() {
     function tryEnter() {
+      // 真全屏只能由用户手势触发：这里同步发起，隐藏状态栏与浏览器栏
+      enterFullscreen();
       el.enter.disabled = true;
       el.enter.textContent = '正在加载音源…';
       setTip('正在加载钢琴音源，就绪后自动进入…');
@@ -1241,6 +1283,10 @@
     bindControls();
     bindDrop();
     bindSplash();
+
+    // 全屏状态变化后再锁横屏：浏览器只允许在全屏状态下调用方向锁
+    document.addEventListener('fullscreenchange', lockLandscape);
+    document.addEventListener('webkitfullscreenchange', lockLandscape);
 
     el.play.disabled = true;
 

@@ -655,7 +655,8 @@ body.dragging .stage::after {
 
 /* ------------------------------ 手机 · 强制横屏 ------------------------------ */
 
-/* 竖屏手机：整个界面旋转 90°（顺时针），始终以横屏布局呈现 */
+/* 优先走 Fullscreen API 真全屏（见 app.js）；不支持时（如 iOS Safari）
+   仍用下面的旋转兜底：竖屏手机把整个界面旋转 90°（顺时针）呈现横屏布局 */
 @media (orientation: portrait) and (pointer: coarse) and (max-width: 480px) {
   .app,
   .splash {
@@ -728,4 +729,17 @@ body.dragging .stage::after {
   .splash .sub { font-size: 11px; letter-spacing: 0.28em; }
   .enter { margin-top: 22px; padding: 12px 32px; }
   .tip { margin-top: 14px; }
+}
+
+/* 手机真全屏横屏：刘海 / 挖孔区域留出安全边距，避免内容被遮挡 */
+@media (pointer: coarse) and (orientation: landscape) {
+  .topbar {
+    padding-left: max(16px, env(safe-area-inset-left));
+    padding-right: max(16px, env(safe-area-inset-right));
+  }
+  .transport {
+    padding-left: max(16px, env(safe-area-inset-left));
+    padding-right: max(16px, env(safe-area-inset-right));
+    padding-bottom: max(10px, env(safe-area-inset-bottom));
+  }
 }
